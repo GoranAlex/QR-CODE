@@ -1,6 +1,6 @@
 # Event Attendance Check-In
 
-A mobile-friendly React app for checking attendees into events by scanning Cvent badge QR codes. Staff can upload an attendee Excel file before the event, scan badges at the door, prevent duplicate check-ins, and export an updated file with status and check-in time.
+A mobile-friendly React app for checking attendees into events by scanning Cvent badge QR codes. Staff sign in with Supabase Auth, upload an attendee Excel file, scan badges at the door, prevent duplicate check-ins, and export updated attendance data.
 
 ## Project Structure
 
@@ -15,26 +15,57 @@ A mobile-friendly React app for checking attendees into events by scanning Cvent
 │   ├── index.css
 │   ├── main.tsx
 │   ├── storage.ts
+│   ├── supabase.ts
 │   └── types.ts
+├── supabase/
+│   └── schema.sql
+├── .env.example
 ├── index.html
 ├── package.json
 └── vite.config.ts
 ```
 
-## Install
+## Supabase Setup
+
+1. Create a Supabase project at [supabase.com](https://supabase.com).
+2. Open the Supabase SQL Editor.
+3. Run the full SQL script in `supabase/schema.sql`.
+4. Go to Authentication settings and disable public signup if you only want manually created staff accounts.
+5. Create staff users in Supabase Authentication.
+
+The schema enables Row Level Security. Only authenticated Supabase users can read attendees, upload/import attendees, update check-ins, clear data, or change the event name.
+
+## Local Environment
+
+Copy `.env.example` to `.env`:
+
+```bash
+cp .env.example .env
+```
+
+On Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Fill in these values from Supabase Project Settings > API:
+
+```bash
+VITE_SUPABASE_URL=https://your-project-ref.supabase.co
+VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
+```
+
+Use the anon key only. Do not put the Supabase service role key in this frontend app or in Vercel client environment variables.
+
+## Install and Run
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open the local URL printed by Vite. For camera testing on a phone, use one of these options:
-
-- Run on `localhost` directly on the same device.
-- Serve the app over HTTPS.
-- Use a secure tunnel such as Cloudflare Tunnel, ngrok, or a deployed HTTPS host.
-
-Mobile browsers block camera access on plain HTTP except for `localhost`.
+Open the local URL printed by Vite. Sign in with a Supabase staff account before using the scanner or admin page.
 
 ## Build
 
@@ -42,6 +73,30 @@ Mobile browsers block camera access on plain HTTP except for `localhost`.
 npm run build
 npm run preview
 ```
+
+## Deploy to Vercel
+
+1. Push this repository to GitHub.
+2. Go to [vercel.com](https://vercel.com) and import the GitHub repository.
+3. Use these build settings:
+   - Framework Preset: `Vite`
+   - Build Command: `npm run build`
+   - Output Directory: `dist`
+4. Add these Vercel environment variables:
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_ANON_KEY`
+5. Deploy.
+
+Vercel provides HTTPS automatically, which is required for mobile camera access outside `localhost`.
+
+## Add to Mobile Device
+
+Open the Vercel URL on the phone:
+
+- iPhone Safari: Share button > Add to Home Screen
+- Android Chrome: menu > Add to Home screen or Install app
+
+The app includes a web manifest so it can launch like a mobile web app.
 
 ## Excel Import Format
 
@@ -52,53 +107,30 @@ Upload `.xlsx`, `.xls`, or `.csv` files from the Admin page. The first sheet is 
 - QR code: `QR Code`, `QR Code Value`, `Cvent QR Code`, `Badge Code`, `Barcode`, `Code`
 - Optional fields: `Company`, `Organization`, `Ticket Type`, `Registration Type`, `Attendee Type`
 
-Rows without a QR code are skipped. Duplicate QR code values are skipped with an import warning.
+Rows without a QR code are skipped. Duplicate QR code values are skipped with an import warning. Uploading a new file replaces the current shared attendee list.
 
 ## How It Works
 
-1. Go to Admin and upload the attendee export.
-2. Go to Check-In and tap Start Camera.
-3. Scan the Cvent badge QR code.
-4. If the QR code matches the uploaded data, the app marks the attendee as Checked In and saves the timestamp.
-5. If the attendee is scanned again, the app shows an already checked-in warning.
-6. Export CSV or Excel from Admin after the event.
+1. Staff sign in with Supabase email/password.
+2. Admin uploads the attendee export.
+3. Staff open the Check-In page and tap Start Camera.
+4. The scanner reads the Cvent badge QR code.
+5. If the code matches, Supabase stores `checked_in`, `check_in_time`, and the staff user ID.
+6. If the attendee is scanned again, the app shows an already checked-in warning.
+7. Admin exports CSV or Excel after the event.
 
-Data is stored locally in the browser with `localStorage`, so it persists after refreshes on the same device. For multiple entrance devices sharing one live attendee list, replace `src/storage.ts` with a backend database API.
+## Security Notes
+
+- All app data is stored in Supabase, not browser `localStorage`.
+- Row Level Security allows database access only for authenticated staff.
+- The frontend uses the Supabase anon key with RLS policies.
+- Keep the service role key private and server-only.
+- Disable public signup for stricter event staff control.
+- Use HTTPS hosting through Vercel for mobile camera support.
 
 ## Dependencies
 
 - React and Vite for the mobile web app
+- Supabase Auth and Postgres for staff login and shared storage
 - `@zxing/browser` for phone-camera QR scanning
 - `xlsx` SheetJS for Excel and CSV import/export
-# React + TypeScript + Vite
-
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
-
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
-```
-
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.

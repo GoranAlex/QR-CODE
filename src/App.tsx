@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { FormEvent } from 'react'
 import { BrowserQRCodeReader } from '@zxing/browser'
 import type { IScannerControls } from '@zxing/browser'
+import type { User } from '@supabase/supabase-js'
 import './App.css'
 import {
   buildCodeCandidates,
@@ -10,12 +12,14 @@ import {
   parseAttendeeWorkbook,
 } from './excel'
 import {
+  checkInAttendee,
   clearAttendees,
   loadAttendees,
   loadEventName,
-  saveAttendees,
+  replaceAttendees,
   saveEventName,
 } from './storage'
+import { isSupabaseConfigured, supabase } from './supabase'
 import type { Attendee, ScanResult } from './types'
 
 type AppView = 'scanner' | 'admin'
@@ -27,7 +31,7 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 
 const initialScanResult: ScanResult = {
   type: 'idle',
-  message: 'Upload your attendee Excel file, then start scanning badges.',
+  message: 'Sign in, upload your attendee Excel file, then start scanning badges.',
 }
 
 function formatDateTime(value: string | null) {
@@ -40,8 +44,8 @@ function formatDateTime(value: string | null) {
 
 function App() {
   const [view, setView] = useState<AppView>('scanner')
-  const [attendees, setAttendees] = useState<Attendee[]>(() => loadAttendees())
-  const [eventName, setEventName] = useState(() => loadEventName())
+  const [attendees, setAttendees] = useState<Attendee[]>([])
+  const [eventName, setEventName] = useState('Event Check-In')
   const [scanResult, setScanResult] = useState<ScanResult>(initialScanResult)
   const [cameraOn, setCameraOn] = useState(false)
   const [cameraError, setCameraError] = useState('')
@@ -50,6 +54,14 @@ function App() {
   const [importWarnings, setImportWarnings] = useState<string[]>([])
   const [importMessage, setImportMessage] = useState('')
   const [isImporting, setIsImporting] = useState(false)
+  const [user, setUser] = useState<User | null>(null)
+  const [authLoading, setAuthLoading] = useState(true)
+  const [authEmail, setAuthEmail] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
+  const [authError, setAuthError] = useState('')
+  const [dataLoading, setDataLoading] = useState(false)
+  const [dataError, setDataError] = useState('')
+  const [eventNameStatus, setEventNameStatus] = useState('')
   const attendeesRef = useRef(attendees)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const controlsRef = useRef<IScannerControls | null>(null)
@@ -82,12 +94,7 @@ function App() {
 
   useEffect(() => {
     attendeesRef.current = attendees
-    saveAttendees(attendees)
   }, [attendees])
-
-  useEffect(() => {
-    saveEventName(eventName)
-  }, [eventName])
 
   const stopCamera = useCallback(() => {
     controlsRef.current?.stop()
@@ -95,71 +102,202 @@ function App() {
     setCameraOn(false)
   }, [])
 
-  const handleQrScan = useCallback((rawCode: string) => {
-    const scannedCode = rawCode.trim()
-    const normalizedScannedCode = normalizeCode(scannedCode)
-
-    if (!normalizedScannedCode) {
+  const refreshData = useCallback(async () => {
+    if (!user) {
+      setAttendees([])
       return
     }
 
-    const now = Date.now()
+    setDataLoading(true)
+    setDataError('')
 
-    if (
-      lastScanRef.current.code === normalizedScannedCode &&
-      now - lastScanRef.current.scannedAt < 2500
-    ) {
-      return
+    try {
+      const [nextEventName, nextAttendees] = await Promise.all([loadEventName(), loadAttendees()])
+      setEventName(nextEventName)
+      setAttendees(nextAttendees)
+      setScanResult((currentResult) =>
+        currentResult.type === 'idle'
+          ? {
+              type: 'idle',
+              message:
+                nextAttendees.length > 0
+                  ? 'Attendee list loaded. Start camera scanning when ready.'
+                  : 'Upload your attendee Excel file before scanning.',
+            }
+          : currentResult,
+      )
+    } catch (error) {
+      setDataError(error instanceof Error ? error.message : 'Could not load Supabase data.')
+    } finally {
+      setDataLoading(false)
+    }
+  }, [user])
+
+  useEffect(() => {
+    if (!isSupabaseConfigured) {
+      setAuthLoading(false)
+      return undefined
     }
 
-    lastScanRef.current = {
-      code: normalizedScannedCode,
-      scannedAt: now,
-    }
+    let mounted = true
 
-    const currentAttendees = attendeesRef.current
-    const scannedCandidates = new Set(buildCodeCandidates(scannedCode))
-    const match = currentAttendees.find(
-      (attendee) =>
-        buildCodeCandidates(attendee.qrCode).some((candidate) => scannedCandidates.has(candidate)),
-    )
+    supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) {
+        return
+      }
 
-    if (!match) {
-      setScanResult({
-        type: 'not-found',
-        scannedCode,
-        message: 'Attendee not found. Check the badge or scan again.',
-      })
-      return
-    }
-
-    if (match.checkedIn) {
-      setScanResult({
-        type: 'duplicate',
-        attendee: match,
-        message: `${match.name} was already checked in at ${formatDateTime(match.checkInTime)}.`,
-      })
-      return
-    }
-
-    const checkInTime = new Date().toISOString()
-    const checkedInAttendee = {
-      ...match,
-      checkedIn: true,
-      checkInTime,
-    }
-    const nextAttendees = currentAttendees.map((attendee) =>
-      attendee.id === match.id ? checkedInAttendee : attendee,
-    )
-
-    attendeesRef.current = nextAttendees
-    setAttendees(nextAttendees)
-    setScanResult({
-      type: 'success',
-      attendee: checkedInAttendee,
-      message: `${checkedInAttendee.name} is checked in.`,
+      setUser(data.session?.user ?? null)
+      setAuthLoading(false)
     })
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null)
+      setAuthLoading(false)
+      setAuthError('')
+    })
+
+    return () => {
+      mounted = false
+      subscription.unsubscribe()
+    }
   }, [])
+
+  useEffect(() => {
+    if (user) {
+      refreshData()
+    } else {
+      stopCamera()
+      setAttendees([])
+      setScanResult(initialScanResult)
+    }
+  }, [refreshData, stopCamera, user])
+
+  async function handleSignIn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setAuthError('')
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email: authEmail.trim(),
+      password: authPassword,
+    })
+
+    if (error) {
+      setAuthError(error.message)
+      return
+    }
+
+    setAuthPassword('')
+  }
+
+  async function handleSignOut() {
+    stopCamera()
+    await supabase.auth.signOut()
+  }
+
+  async function handleEventNameBlur() {
+    if (!user) {
+      return
+    }
+
+    setEventNameStatus('Saving...')
+
+    try {
+      await saveEventName(eventName.trim() || 'Event Check-In', user.id)
+      setEventNameStatus('Saved')
+      window.setTimeout(() => setEventNameStatus(''), 1800)
+    } catch (error) {
+      setEventNameStatus(error instanceof Error ? error.message : 'Could not save event name.')
+    }
+  }
+
+  const handleQrScan = useCallback(
+    async (rawCode: string) => {
+      const scannedCode = rawCode.trim()
+      const normalizedScannedCode = normalizeCode(scannedCode)
+
+      if (!normalizedScannedCode || !user) {
+        return
+      }
+
+      const now = Date.now()
+
+      if (
+        lastScanRef.current.code === normalizedScannedCode &&
+        now - lastScanRef.current.scannedAt < 2500
+      ) {
+        return
+      }
+
+      lastScanRef.current = {
+        code: normalizedScannedCode,
+        scannedAt: now,
+      }
+
+      const currentAttendees = attendeesRef.current
+      const scannedCandidates = new Set(buildCodeCandidates(scannedCode))
+      const match = currentAttendees.find((attendee) =>
+        buildCodeCandidates(attendee.qrCode).some((candidate) => scannedCandidates.has(candidate)),
+      )
+
+      if (!match) {
+        setScanResult({
+          type: 'not-found',
+          scannedCode,
+          message: 'Attendee not found. Check the badge or scan again.',
+        })
+        return
+      }
+
+      if (match.checkedIn) {
+        setScanResult({
+          type: 'duplicate',
+          attendee: match,
+          message: `${match.name} was already checked in at ${formatDateTime(match.checkInTime)}.`,
+        })
+        return
+      }
+
+      try {
+        const checkedInAttendee = await checkInAttendee(match.id, user.id)
+
+        if (!checkedInAttendee) {
+          const latestAttendees = await loadAttendees()
+          const latestMatch = latestAttendees.find((attendee) => attendee.id === match.id) ?? match
+
+          setAttendees(latestAttendees)
+          setScanResult({
+            type: 'duplicate',
+            attendee: latestMatch,
+            message: `${latestMatch.name} was already checked in at ${formatDateTime(
+              latestMatch.checkInTime,
+            )}.`,
+          })
+          return
+        }
+
+        const nextAttendees = currentAttendees.map((attendee) =>
+          attendee.id === match.id ? checkedInAttendee : attendee,
+        )
+
+        attendeesRef.current = nextAttendees
+        setAttendees(nextAttendees)
+        setScanResult({
+          type: 'success',
+          attendee: checkedInAttendee,
+          message: `${checkedInAttendee.name} is checked in.`,
+        })
+      } catch (error) {
+        setScanResult({
+          type: 'not-found',
+          scannedCode,
+          message: error instanceof Error ? error.message : 'Could not save this check-in.',
+        })
+      }
+    },
+    [user],
+  )
 
   useEffect(() => {
     if (!cameraOn) {
@@ -231,6 +369,7 @@ function App() {
 
     try {
       const summary = await parseAttendeeWorkbook(file)
+      await replaceAttendees(summary.attendees)
       setAttendees(summary.attendees)
       setImportWarnings(summary.warnings)
       setImportMessage(`Imported ${summary.attendees.length} attendees from ${summary.fileName}.`)
@@ -250,27 +389,97 @@ function App() {
     }
   }
 
-  function handleManualSubmit(event: React.FormEvent<HTMLFormElement>) {
+  function handleManualSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     handleQrScan(manualCode)
     setManualCode('')
   }
 
-  function handleClearData() {
-    const confirmed = window.confirm(
-      'Clear all imported attendees and check-in status from this browser?',
-    )
+  async function handleClearData() {
+    const confirmed = window.confirm('Clear all imported attendees and check-in status?')
 
     if (!confirmed) {
       return
     }
 
-    stopCamera()
-    clearAttendees()
-    setAttendees([])
-    setImportWarnings([])
-    setImportMessage('')
-    setScanResult(initialScanResult)
+    try {
+      stopCamera()
+      await clearAttendees()
+      setAttendees([])
+      setImportWarnings([])
+      setImportMessage('')
+      setScanResult(initialScanResult)
+    } catch (error) {
+      setDataError(error instanceof Error ? error.message : 'Could not clear attendees.')
+    }
+  }
+
+  if (!isSupabaseConfigured) {
+    return (
+      <div className="auth-shell">
+        <section className="auth-card">
+          <p className="eyebrow">Setup Required</p>
+          <h1>Connect Supabase</h1>
+          <p>
+            Add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` to your local `.env` file and to
+            Vercel environment variables.
+          </p>
+        </section>
+      </div>
+    )
+  }
+
+  if (authLoading) {
+    return (
+      <div className="auth-shell">
+        <section className="auth-card">
+          <p className="eyebrow">Loading</p>
+          <h1>Checking staff session...</h1>
+        </section>
+      </div>
+    )
+  }
+
+  if (!user) {
+    return (
+      <div className="auth-shell">
+        <form className="auth-card" onSubmit={handleSignIn}>
+          <div>
+            <p className="eyebrow">Staff Login</p>
+            <h1>Sign in to check in attendees</h1>
+            <p>Use a staff account created in Supabase Auth.</p>
+          </div>
+
+          <label>
+            Email
+            <input
+              type="email"
+              value={authEmail}
+              onChange={(event) => setAuthEmail(event.target.value)}
+              autoComplete="email"
+              required
+            />
+          </label>
+
+          <label>
+            Password
+            <input
+              type="password"
+              value={authPassword}
+              onChange={(event) => setAuthPassword(event.target.value)}
+              autoComplete="current-password"
+              required
+            />
+          </label>
+
+          {authError ? <p className="alert error">{authError}</p> : null}
+
+          <button type="submit" className="primary-button">
+            Sign In
+          </button>
+        </form>
+      </div>
+    )
   }
 
   return (
@@ -285,29 +494,42 @@ function App() {
             className="event-name-input"
             value={eventName}
             onChange={(event) => setEventName(event.target.value)}
+            onBlur={handleEventNameBlur}
             aria-label="Event name"
           />
+          {eventNameStatus ? <span className="save-status">{eventNameStatus}</span> : null}
         </div>
 
-        <nav className="top-tabs" aria-label="Main navigation">
-          <button
-            type="button"
-            className={view === 'scanner' ? 'active' : ''}
-            onClick={() => setView('scanner')}
-          >
-            Check-In
-          </button>
-          <button
-            type="button"
-            className={view === 'admin' ? 'active' : ''}
-            onClick={() => setView('admin')}
-          >
-            Admin
-          </button>
-        </nav>
+        <div className="header-actions">
+          <nav className="top-tabs" aria-label="Main navigation">
+            <button
+              type="button"
+              className={view === 'scanner' ? 'active' : ''}
+              onClick={() => setView('scanner')}
+            >
+              Check-In
+            </button>
+            <button
+              type="button"
+              className={view === 'admin' ? 'active' : ''}
+              onClick={() => setView('admin')}
+            >
+              Admin
+            </button>
+          </nav>
+          <div className="staff-chip">
+            <span>{user.email}</span>
+            <button type="button" onClick={handleSignOut}>
+              Sign Out
+            </button>
+          </div>
+        </div>
       </header>
 
       <main>
+        {dataError ? <p className="alert error">{dataError}</p> : null}
+        {dataLoading ? <p className="alert success">Loading shared attendee data...</p> : null}
+
         <section className="stats-grid" aria-label="Attendance summary">
           <div className="stat-card">
             <span>Total</span>
@@ -364,6 +586,9 @@ function App() {
                 >
                   Stop
                 </button>
+                <button type="button" className="secondary-button" onClick={refreshData}>
+                  Refresh
+                </button>
               </div>
 
               <p className="helper-text">
@@ -411,6 +636,7 @@ function App() {
                 <h1>Upload attendee Excel</h1>
                 <p>
                   Import a Cvent export with attendee name, email or ID, and a QR code value column.
+                  Uploading replaces the current shared attendee list.
                 </p>
               </div>
 
@@ -449,6 +675,9 @@ function App() {
                   <h2>Search and export</h2>
                 </div>
                 <div className="export-actions">
+                  <button type="button" className="secondary-button" onClick={refreshData}>
+                    Refresh
+                  </button>
                   <button
                     type="button"
                     className="secondary-button"
@@ -504,7 +733,7 @@ function App() {
                 disabled={attendees.length === 0}
                 onClick={handleClearData}
               >
-                Clear Local Data
+                Clear Shared Data
               </button>
             </div>
           </section>
