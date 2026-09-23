@@ -1,6 +1,8 @@
 import * as XLSX from 'xlsx'
 import type { Attendee, ImportSummary } from './types'
 
+const maxImportFileSizeBytes = 10 * 1024 * 1024
+
 const headerAliases = {
   name: [
     'attendee name',
@@ -87,9 +89,6 @@ export function buildCodeCandidates(value: string) {
       addCandidate(candidates, url.searchParams.get(key) ?? '')
     }
 
-    for (const value of url.searchParams.values()) {
-      addCandidate(candidates, value)
-    }
   } catch {
     return [...candidates]
   }
@@ -157,6 +156,14 @@ function makeAttendeeId(email: string, uniqueId: string, qrCode: string, sourceR
 }
 
 export async function parseAttendeeWorkbook(file: File): Promise<ImportSummary> {
+  if (file.size > maxImportFileSizeBytes) {
+    return {
+      attendees: [],
+      warnings: ['The selected file is too large. Use a file smaller than 10 MB.'],
+      fileName: file.name,
+    }
+  }
+
   const data = await file.arrayBuffer()
   const workbook = XLSX.read(data, { cellDates: true, type: 'array' })
   const firstSheetName = workbook.SheetNames[0]

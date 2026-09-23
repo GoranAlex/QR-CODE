@@ -116,21 +116,25 @@ export async function loadAttendanceSummary(): Promise<AttendanceSummary> {
 }
 
 export async function verifyScan(code: string): Promise<VerifyScanResponse> {
-  return apiFetch<VerifyScanResponse>('/api/verify-scan', {
-    method: 'POST',
-    body: JSON.stringify({ code }),
-  })
+  return apiFetch<VerifyScanResponse>(
+    '/api/verify-scan',
+    {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    },
+    { allowStatuses: [429] },
+  )
 }
 
-function apiUrl(path: string) {
-  const baseUrl = import.meta.env.BASE_URL.endsWith('/')
-    ? import.meta.env.BASE_URL
-    : `${import.meta.env.BASE_URL}/`
-
-  return `${baseUrl}${path.replace(/^\/+/, '')}`
+type ApiFetchOptions = {
+  allowStatuses?: number[]
 }
 
-async function apiFetch<T = unknown>(url: string, init: RequestInit): Promise<T> {
+async function apiFetch<T = unknown>(
+  url: string,
+  init: RequestInit,
+  options: ApiFetchOptions = {},
+): Promise<T> {
   const response = await fetch(apiUrl(url), {
     ...init,
     credentials: 'same-origin',
@@ -140,12 +144,25 @@ async function apiFetch<T = unknown>(url: string, init: RequestInit): Promise<T>
     },
   })
   const body = await parseApiResponse(response)
+  const allowedStatus = options.allowStatuses?.includes(response.status) ?? false
 
-  if (!response.ok) {
+  if (!response.ok && !allowedStatus) {
+    if (response.status === 401 && url !== '/api/me' && url !== '/api/login') {
+      window.dispatchEvent(new CustomEvent('event-checkin:unauthorized'))
+    }
+
     throw new Error(body.error ?? 'Request failed.')
   }
 
   return body as T
+}
+
+function apiUrl(path: string) {
+  const baseUrl = import.meta.env.BASE_URL.endsWith('/')
+    ? import.meta.env.BASE_URL
+    : `${import.meta.env.BASE_URL}/`
+
+  return `${baseUrl}${path.replace(/^\/+/, '')}`
 }
 
 async function parseApiResponse(response: Response): Promise<{ error?: string }> {

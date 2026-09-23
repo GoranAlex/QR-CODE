@@ -18,9 +18,15 @@ const sessionCookieName = 'event_checkin_session'
 const sessionMaxAgeSeconds = 8 * 60 * 60
 const rateLimitWindowMs = 60_000
 const defaultRateLimit = 60
+const loginRateLimitWindowMs = 15 * 60_000
+const loginRateLimitMaxAttempts = Number(process.env.LOGIN_RATE_LIMIT_PER_15_MINUTES ?? 10)
+const maxImportAttendees = Number(process.env.MAX_IMPORT_ATTENDEES ?? 5000)
 const defaultEventName = 'Event Check-In'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const distPath = path.resolve(__dirname, '..', 'dist')
+const loginAttempts = new Map()
+const isProduction = process.env.NODE_ENV === 'production'
+const useSecureCookies = process.env.COOKIE_SECURE === 'true' || isProduction
 
 app.set('trust proxy', 1)
 app.use(express.json({ limit: '10mb' }))
@@ -45,7 +51,7 @@ api.get('/health', (_req, res) => {
   res.json({ ok: true })
 })
 
-api.get('/health/db', async (_req, res) => {
+api.get('/health/db', requireAdmin, async (_req, res) => {
   try {
     const result = await query(
       `
@@ -80,6 +86,12 @@ api.post('/login', async (req, res) => {
       return
     }
 
+    const loginKey = `${getClientIp(req)}:${email}`
+    if (isLoginRateLimited(loginKey)) {
+      res.status(429).json({ error: 'Too many login attempts. Please try again later.' })
+      return
+    }
+
     const result = await query(
       `
         select id::text, email, password_hash, role, client_id::text
@@ -92,6 +104,7 @@ api.post('/login', async (req, res) => {
     const userRow = result.rows[0]
 
     if (!userRow || !(await bcrypt.compare(password, userRow.password_hash))) {
+      recordFailedLogin(loginKey)
       res.status(401).json({ error: 'Invalid email or password.' })
       return
     }
@@ -104,6 +117,7 @@ api.post('/login', async (req, res) => {
     }
     const token = await createSessionToken(user)
 
+    clearLoginAttempts(loginKey)
     setSessionCookie(res, token)
     res.json({ user })
   } catch (error) {
@@ -238,6 +252,11 @@ api.post('/attendees/import', requireAdmin, async (req, res) => {
     return
   }
 
+  if (incomingAttendees.length > maxImportAttendees) {
+    res.status(413).json({ error: `Import is limited to ${maxImportAttendees} attendees at a time.` })
+    return
+  }
+
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -324,6 +343,7 @@ api.post('/attendees/import', requireAdmin, async (req, res) => {
         set name = excluded.name,
             email = excluded.email,
             unique_id = excluded.unique_id,
+            qr_code = excluded.qr_code,
             company = excluded.company,
             ticket_type = excluded.ticket_type,
             source_row = excluded.source_row,
@@ -432,11 +452,22 @@ api.post('/verify-scan', requireUser, async (req, res) => {
     const checkedInAttendee = updateResult.rows[0]
 
     if (!checkedInAttendee) {
+      const duplicateResult = await query(
+        `
+          select name, check_in_time
+          from public.attendees
+          where id = $1
+          limit 1
+        `,
+        [attendee.id],
+      )
+      const duplicateAttendee = duplicateResult.rows[0] ?? attendee
+
       res.json({
         status: 'duplicate',
         attendee: {
-          name: attendee.name,
-          checkInTime: new Date().toISOString(),
+          name: duplicateAttendee.name,
+          checkInTime: duplicateAttendee.check_in_time,
         },
       })
       return
@@ -457,7 +488,9 @@ api.post('/verify-scan', requireUser, async (req, res) => {
 })
 
 app.use(`${basePath}/api`, api)
-app.use('/api', api)
+if (!isProduction || process.env.ALLOW_ROOT_API === 'true') {
+  app.use('/api', api)
+}
 if (basePath) {
   app.get(basePath, (_req, res) => {
     res.redirect(308, `${basePath}/`)
@@ -519,11 +552,26 @@ async function authenticate(req) {
       return null
     }
 
+    const result = await query(
+      `
+        select id::text, email, role, client_id::text
+        from public.users
+        where id = $1
+        limit 1
+      `,
+      [payload.id],
+    )
+    const userRow = result.rows[0]
+
+    if (!userRow) {
+      return null
+    }
+
     return {
-      id: payload.id,
-      email: payload.email,
-      role: payload.role,
-      clientId: payload.clientId ?? null,
+      id: userRow.id,
+      email: userRow.email,
+      role: normalizeRole(userRow.role),
+      clientId: userRow.client_id,
     }
   } catch {
     return null
@@ -562,7 +610,7 @@ async function requireAdmin(req, res, next) {
 function setSessionCookie(res, token) {
   res.cookie(sessionCookieName, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: useSecureCookies,
     sameSite: 'strict',
     path: cookiePath,
     maxAge: sessionMaxAgeSeconds * 1000,
@@ -572,7 +620,7 @@ function setSessionCookie(res, token) {
 function clearSessionCookie(res) {
   res.clearCookie(sessionCookieName, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: useSecureCookies,
     sameSite: 'strict',
     path: cookiePath,
   })
@@ -625,6 +673,25 @@ function getClientIp(req) {
   return req.socket.remoteAddress ?? 'unknown'
 }
 
+function isLoginRateLimited(key) {
+  const cutoff = Date.now() - loginRateLimitWindowMs
+  const attempts = (loginAttempts.get(key) ?? []).filter((timestamp) => timestamp >= cutoff)
+  loginAttempts.set(key, attempts)
+
+  return attempts.length >= loginRateLimitMaxAttempts
+}
+
+function recordFailedLogin(key) {
+  const cutoff = Date.now() - loginRateLimitWindowMs
+  const attempts = (loginAttempts.get(key) ?? []).filter((timestamp) => timestamp >= cutoff)
+  attempts.push(Date.now())
+  loginAttempts.set(key, attempts)
+}
+
+function clearLoginAttempts(key) {
+  loginAttempts.delete(key)
+}
+
 function hashValue(value) {
   return crypto.createHash('sha256').update(value).digest('hex')
 }
@@ -665,9 +732,6 @@ function buildCodeCandidates(value) {
       addCandidate(candidates, url.searchParams.get(key) ?? '')
     }
 
-    for (const queryValue of url.searchParams.values()) {
-      addCandidate(candidates, queryValue)
-    }
   } catch {
     return [...candidates]
   }

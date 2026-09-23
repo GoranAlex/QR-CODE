@@ -57,6 +57,11 @@ export type ScanResult =
       message: string
     }
   | {
+      type: 'rate-limited'
+      scannedCode: string
+      message: string
+    }
+  | {
       type: 'idle'
       message: string
     }

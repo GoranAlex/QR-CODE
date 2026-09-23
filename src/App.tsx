@@ -36,7 +36,13 @@ function formatDateTime(value: string | null) {
     return '-'
   }
 
-  return dateFormatter.format(new Date(value))
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return '-'
+  }
+
+  return dateFormatter.format(date)
 }
 
 function App() {
@@ -53,6 +59,7 @@ function App() {
   const [authEmail, setAuthEmail] = useState('')
   const [authPassword, setAuthPassword] = useState('')
   const [authError, setAuthError] = useState('')
+  const [authSubmitting, setAuthSubmitting] = useState(false)
   const [dataLoading, setDataLoading] = useState(false)
   const [dataError, setDataError] = useState('')
   const [eventNameStatus, setEventNameStatus] = useState('')
@@ -65,6 +72,7 @@ function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const controlsRef = useRef<IScannerControls | null>(null)
   const lastScanRef = useRef({ code: '', scannedAt: 0 })
+  const dataRequestIdRef = useRef(0)
   const toastTimeoutRef = useRef<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [importLoading, setImportLoading] = useState(false)
@@ -119,6 +127,10 @@ function App() {
       return
     }
 
+    const requestId = dataRequestIdRef.current + 1
+    dataRequestIdRef.current = requestId
+    const activeUserId = user.id
+
     setDataLoading(true)
     setDataError('')
 
@@ -128,6 +140,10 @@ function App() {
         loadAttendanceSummary(),
         user.role === 'admin' ? loadAttendees() : Promise.resolve([]),
       ])
+
+      if (dataRequestIdRef.current !== requestId || user.id !== activeUserId) {
+        return
+      }
 
       if (user.role !== 'admin') {
         setView('scanner')
@@ -148,9 +164,15 @@ function App() {
           : currentResult,
       )
     } catch (error) {
+      if (dataRequestIdRef.current !== requestId) {
+        return
+      }
+
       setDataError(error instanceof Error ? error.message : 'Could not load database data.')
     } finally {
-      setDataLoading(false)
+      if (dataRequestIdRef.current === requestId) {
+        setDataLoading(false)
+      }
     }
   }, [user])
 
@@ -172,9 +194,25 @@ function App() {
   }, [])
 
   useEffect(() => {
+    function handleUnauthorized() {
+      dataRequestIdRef.current += 1
+      stopCamera()
+      setUser(null)
+      setAuthError('Your session expired. Please sign in again.')
+    }
+
+    window.addEventListener('event-checkin:unauthorized', handleUnauthorized)
+
+    return () => {
+      window.removeEventListener('event-checkin:unauthorized', handleUnauthorized)
+    }
+  }, [stopCamera])
+
+  useEffect(() => {
     if (user) {
       refreshData()
     } else {
+      dataRequestIdRef.current += 1
       stopCamera()
       setAttendees([])
       setSummary({
@@ -188,7 +226,12 @@ function App() {
 
   async function handleSignIn(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (authSubmitting) {
+      return
+    }
+
     setAuthError('')
+    setAuthSubmitting(true)
 
     try {
       const signedInUser = await signIn(authEmail.trim(), authPassword)
@@ -196,13 +239,20 @@ function App() {
       setAuthPassword('')
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Unable to sign in.')
+    } finally {
+      setAuthSubmitting(false)
     }
   }
 
   async function handleSignOut() {
-    stopCamera()
-    await signOut()
-    setUser(null)
+    try {
+      stopCamera()
+      await signOut()
+      dataRequestIdRef.current += 1
+      setUser(null)
+    } catch (error) {
+      setDataError(error instanceof Error ? error.message : 'Could not log out. Please try again.')
+    }
   }
 
   async function handleEventNameBlur() {
@@ -258,7 +308,7 @@ function App() {
 
         if (response.status === 'rate_limited') {
           setScanResult({
-            type: 'not-found',
+            type: 'rate-limited',
             scannedCode,
             message: `Too many scan attempts. Try again in ${response.retryAfterSeconds} seconds.`,
           })
@@ -282,8 +332,13 @@ function App() {
           message: `${response.attendee.name} is checked in.`,
         })
         setCheckInToast(response.attendee)
+        const scanRequestId = dataRequestIdRef.current
         loadAttendanceSummary()
-          .then(setSummary)
+          .then((nextSummary) => {
+            if (dataRequestIdRef.current === scanRequestId) {
+              setSummary(nextSummary)
+            }
+          })
           .catch(() => undefined)
 
         if (toastTimeoutRef.current) {
@@ -443,7 +498,7 @@ function App() {
   if (!user) {
     return (
       <div className="auth-shell">
-        <form className="auth-card" onSubmit={handleSignIn}>
+        <form className="auth-card" onSubmit={handleSignIn} aria-busy={authSubmitting}>
           <div>
             <img
               className="brand-logo auth-logo"
@@ -482,8 +537,8 @@ function App() {
 
           {authError ? <p className="alert error">{authError}</p> : null}
 
-          <button type="submit" className="primary-button">
-            Sign In
+          <button type="submit" className="primary-button" disabled={authSubmitting}>
+            {authSubmitting ? 'Signing in...' : 'Sign In'}
           </button>
         </form>
       </div>
@@ -533,6 +588,7 @@ function App() {
             <button
               type="button"
               className={view === 'scanner' ? 'active' : ''}
+              aria-current={view === 'scanner' ? 'page' : undefined}
               onClick={() => setView('scanner')}
             >
               Check-In
@@ -541,6 +597,7 @@ function App() {
               <button
                 type="button"
                 className={view === 'admin' ? 'active' : ''}
+                aria-current={view === 'admin' ? 'page' : undefined}
                 onClick={() => setView('admin')}
               >
                 Admin
@@ -556,9 +613,9 @@ function App() {
         </div>
       </header>
 
-      <main>
+      <main aria-busy={dataLoading}>
         {dataError ? <p className="alert error">{dataError}</p> : null}
-        {dataLoading ? <p className="alert success">Loading shared attendee data...</p> : null}
+        {dataLoading ? <p className="alert info">Loading shared attendee data...</p> : null}
 
         <section className="stats-grid" aria-label="Attendance summary">
           <div className="stat-card">
@@ -581,7 +638,7 @@ function App() {
               <div className="panel-heading">
                 <div>
                   <p className="eyebrow">Badge Scanner</p>
-                  <h1>Scan attendee QR codes</h1>
+                  <h2>Scan attendee QR codes</h2>
                 </div>
                 <span className={cameraOn ? 'pill live' : 'pill'}>{cameraOn ? 'Live' : 'Off'}</span>
               </div>
@@ -603,7 +660,7 @@ function App() {
                 <button
                   type="button"
                   className="primary-button"
-                  disabled={summary.total === 0 || cameraOn}
+                  disabled={summary.total === 0 || cameraOn || dataLoading}
                   onClick={() => setCameraOn(true)}
                 >
                   Start Camera
@@ -616,7 +673,7 @@ function App() {
                 >
                   Stop
                 </button>
-                <button type="button" className="secondary-button" onClick={refreshData}>
+                <button type="button" className="secondary-button" disabled={dataLoading} onClick={refreshData}>
                   Refresh
                 </button>
               </div>
@@ -627,7 +684,7 @@ function App() {
               </p>
             </div>
 
-            <div className={`scan-result ${scanResult.type}`}>
+            <div className={`scan-result ${scanResult.type}`} role="status" aria-live="polite" aria-atomic="true">
               <p className="eyebrow">Latest Scan</p>
               <h2>{scanResult.message}</h2>
               {scanResult.type === 'success' || scanResult.type === 'duplicate' ? (
@@ -636,7 +693,7 @@ function App() {
                   <span>Checked in: {formatDateTime(scanResult.attendee.checkInTime)}</span>
                 </div>
               ) : null}
-              {scanResult.type === 'not-found' ? (
+              {scanResult.type === 'not-found' || scanResult.type === 'rate-limited' ? (
                 <code className="scanned-code">{scanResult.scannedCode}</code>
               ) : null}
             </div>
@@ -650,7 +707,7 @@ function App() {
                   onChange={(event) => setManualCode(event.target.value)}
                   placeholder="Paste or type a QR code value"
                 />
-                <button type="submit" disabled={!manualCode.trim() || summary.total === 0}>
+                <button type="submit" disabled={!manualCode.trim() || summary.total === 0 || dataLoading}>
                   Check In
                 </button>
               </div>
@@ -700,7 +757,7 @@ function App() {
                 Optional columns: Email, Attendee ID, Company, Ticket Type.
               </div>
 
-              <button type="button" className="secondary-button" onClick={refreshData}>
+              <button type="button" className="secondary-button" disabled={dataLoading} onClick={refreshData}>
                 Reload Database Attendees
               </button>
             </div>
@@ -712,7 +769,7 @@ function App() {
                   <h2>Search and export</h2>
                 </div>
                 <div className="export-actions">
-                  <button type="button" className="secondary-button" onClick={refreshData}>
+                  <button type="button" className="secondary-button" disabled={dataLoading} onClick={refreshData}>
                     Refresh
                   </button>
                   <button
@@ -760,7 +817,11 @@ function App() {
                     </article>
                   ))
                 ) : (
-                  <p className="empty-state">No attendees match this search.</p>
+                  <p className="empty-state">
+                    {attendees.length === 0
+                      ? 'No attendees have been imported yet.'
+                      : 'No attendees match this search.'}
+                  </p>
                 )}
               </div>
 

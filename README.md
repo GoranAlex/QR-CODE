@@ -10,6 +10,7 @@ A mobile-friendly event check-in app with server-side QR verification. Staff sig
 │   └── schema.sql
 ├── public/
 │   ├── manifest.webmanifest
+│   ├── favicon.svg
 │   └── nct.png
 ├── server/
 │   └── index.js
@@ -53,12 +54,17 @@ Fill in:
 DATABASE_URL=postgres://user:password@host:5432/database
 JWT_SECRET=replace-with-a-random-string-at-least-32-characters
 SCAN_RATE_LIMIT_PER_MINUTE=60
+LOGIN_RATE_LIMIT_PER_15_MINUTES=10
+MAX_IMPORT_ATTENDEES=5000
 POSTGRES_SSL=true
+COOKIE_SECURE=true
 PORT=3001
 BASE_PATH=/corporate/QRCode
+VITE_BASE_PATH=/corporate/QRCode/
 ```
 
 Set `POSTGRES_SSL=false` if PostgreSQL is on the same Linux server and does not use SSL.
+Set `COOKIE_SECURE=true` when serving the app over HTTPS in production.
 
 Do not put secrets in `public/`. Anything inside `public/` is served on the live website.
 
@@ -79,10 +85,10 @@ Health check:
 
 ```text
 http://localhost:5173/corporate/QRCode/api/health
-http://localhost:5173/corporate/QRCode/api/health/db
 ```
 
 `npm run dev` starts both the Express API and the Vite frontend. Vite proxies `/corporate/QRCode/api/*` requests to Express.
+The database health endpoint `/corporate/QRCode/api/health/db` is protected and requires an admin session.
 
 ## Production Run
 

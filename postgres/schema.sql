@@ -1,5 +1,20 @@
 create extension if not exists pgcrypto;
 
+create table if not exists public.users (
+  id uuid primary key default gen_random_uuid(),
+  email text not null unique,
+  password_hash text not null,
+  role text not null default 'scanner',
+  client_id text,
+  must_change_password boolean not null default false,
+  password_changed_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists users_email_lower_idx
+on public.users (lower(email));
+
 create table if not exists public.app_settings (
   key text primary key,
   value text not null,
@@ -79,6 +94,12 @@ $$;
 drop trigger if exists set_app_settings_updated_at on public.app_settings;
 create trigger set_app_settings_updated_at
 before update on public.app_settings
+for each row
+execute function public.set_updated_at();
+
+drop trigger if exists set_users_updated_at on public.users;
+create trigger set_users_updated_at
+before update on public.users
 for each row
 execute function public.set_updated_at();
 
