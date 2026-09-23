@@ -37,6 +37,7 @@ body {
 button,
 input {
   font: inherit;
+  -webkit-tap-highlight-color: transparent;
 }
 
 button:focus-visible,
@@ -48,4 +49,10 @@ input:focus-visible {
 ::selection {
   color: #fff;
   background: var(--primary);
+}
+
+@media (hover: none) and (pointer: coarse) {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
 }

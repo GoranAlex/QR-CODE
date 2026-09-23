@@ -1,10 +1,6 @@
-import { supabase } from './supabase'
-import type { Attendee } from './types'
+import type { AttendanceSummary, Attendee, AuthUser, ImportAttendeesResponse, VerifyScanResponse } from './types'
 
-const EVENT_NAME_KEY = 'event_name'
-const DEFAULT_EVENT_NAME = 'Event Check-In'
-
-type AttendeeRow = {
+type AttendeeApiRow = {
   id: string
   name: string
   email: string
@@ -19,11 +15,19 @@ type AttendeeRow = {
   original: Record<string, string> | null
 }
 
-function normalizeQrCode(value: string) {
-  return value.trim().toLowerCase()
+type UserResponse = {
+  user: AuthUser
 }
 
-function toAttendee(row: AttendeeRow): Attendee {
+type SettingsResponse = {
+  eventName: string
+}
+
+type AttendeesResponse = {
+  attendees: AttendeeApiRow[]
+}
+
+function toAttendee(row: AttendeeApiRow): Attendee {
   return {
     id: row.id,
     name: row.name,
@@ -40,117 +44,121 @@ function toAttendee(row: AttendeeRow): Attendee {
   }
 }
 
-function toAttendeeRow(attendee: Attendee) {
-  return {
-    id: attendee.id,
-    name: attendee.name,
-    email: attendee.email,
-    unique_id: attendee.uniqueId,
-    qr_code: attendee.qrCode,
-    qr_code_normalized: normalizeQrCode(attendee.qrCode),
-    company: attendee.company,
-    ticket_type: attendee.ticketType,
-    checked_in: attendee.checkedIn,
-    check_in_time: attendee.checkInTime,
-    imported_at: attendee.importedAt,
-    source_row: attendee.sourceRow,
-    original: attendee.original,
+export async function signIn(email: string, password: string): Promise<AuthUser> {
+  const response = await apiFetch<UserResponse>('/api/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  })
+
+  return response.user
+}
+
+export async function loadCurrentUser(): Promise<AuthUser | null> {
+  try {
+    const response = await apiFetch<UserResponse>('/api/me', {
+      method: 'GET',
+    })
+
+    return response.user
+  } catch {
+    return null
   }
 }
 
-function throwStorageError(action: string, error: { message: string }) {
-  throw new Error(`${action}: ${error.message}`)
+export async function signOut() {
+  await apiFetch('/api/logout', {
+    method: 'POST',
+  })
 }
 
 export async function loadAttendees(): Promise<Attendee[]> {
-  const { data, error } = await supabase
-    .from('attendees')
-    .select(
-      'id,name,email,unique_id,qr_code,company,ticket_type,checked_in,check_in_time,imported_at,source_row,original',
-    )
-    .order('source_row', { ascending: true })
+  const response = await apiFetch<AttendeesResponse>('/api/attendees', {
+    method: 'GET',
+  })
 
-  if (error) {
-    throwStorageError('Could not load attendees', error)
-  }
-
-  return (data ?? []).map((row) => toAttendee(row as AttendeeRow))
-}
-
-export async function replaceAttendees(attendees: Attendee[]) {
-  const { error: deleteError } = await supabase
-    .from('attendees')
-    .delete()
-    .neq('id', '__never__')
-
-  if (deleteError) {
-    throwStorageError('Could not clear existing attendees', deleteError)
-  }
-
-  if (attendees.length === 0) {
-    return
-  }
-
-  const { error: insertError } = await supabase.from('attendees').insert(attendees.map(toAttendeeRow))
-
-  if (insertError) {
-    throwStorageError('Could not import attendees', insertError)
-  }
-}
-
-export async function checkInAttendee(attendeeId: string, staffUserId: string): Promise<Attendee | null> {
-  const checkInTime = new Date().toISOString()
-  const { data, error } = await supabase
-    .from('attendees')
-    .update({
-      checked_in: true,
-      check_in_time: checkInTime,
-      checked_in_by: staffUserId,
-    })
-    .eq('id', attendeeId)
-    .eq('checked_in', false)
-    .select(
-      'id,name,email,unique_id,qr_code,company,ticket_type,checked_in,check_in_time,imported_at,source_row,original',
-    )
-    .maybeSingle()
-
-  if (error) {
-    throwStorageError('Could not check in attendee', error)
-  }
-
-  return data ? toAttendee(data as AttendeeRow) : null
+  return response.attendees.map(toAttendee)
 }
 
 export async function clearAttendees() {
-  const { error } = await supabase.from('attendees').delete().neq('id', '__never__')
+  await apiFetch('/api/attendees', {
+    method: 'DELETE',
+  })
+}
 
-  if (error) {
-    throwStorageError('Could not clear attendees', error)
-  }
+export async function importAttendees(attendees: Attendee[]): Promise<ImportAttendeesResponse> {
+  return apiFetch<ImportAttendeesResponse>('/api/attendees/import', {
+    method: 'POST',
+    body: JSON.stringify({ attendees }),
+  })
 }
 
 export async function loadEventName(): Promise<string> {
-  const { data, error } = await supabase
-    .from('app_settings')
-    .select('value')
-    .eq('key', EVENT_NAME_KEY)
-    .maybeSingle()
-
-  if (error) {
-    throwStorageError('Could not load event name', error)
-  }
-
-  return data?.value ?? DEFAULT_EVENT_NAME
-}
-
-export async function saveEventName(eventName: string, staffUserId: string) {
-  const { error } = await supabase.from('app_settings').upsert({
-    key: EVENT_NAME_KEY,
-    value: eventName,
-    updated_by: staffUserId,
+  const response = await apiFetch<SettingsResponse>('/api/settings', {
+    method: 'GET',
   })
 
-  if (error) {
-    throwStorageError('Could not save event name', error)
+  return response.eventName
+}
+
+export async function saveEventName(eventName: string): Promise<string> {
+  const response = await apiFetch<SettingsResponse>('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ eventName }),
+  })
+
+  return response.eventName
+}
+
+export async function loadAttendanceSummary(): Promise<AttendanceSummary> {
+  return apiFetch<AttendanceSummary>('/api/summary', {
+    method: 'GET',
+  })
+}
+
+export async function verifyScan(code: string): Promise<VerifyScanResponse> {
+  return apiFetch<VerifyScanResponse>('/api/verify-scan', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  })
+}
+
+function apiUrl(path: string) {
+  const baseUrl = import.meta.env.BASE_URL.endsWith('/')
+    ? import.meta.env.BASE_URL
+    : `${import.meta.env.BASE_URL}/`
+
+  return `${baseUrl}${path.replace(/^\/+/, '')}`
+}
+
+async function apiFetch<T = unknown>(url: string, init: RequestInit): Promise<T> {
+  const response = await fetch(apiUrl(url), {
+    ...init,
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      ...init.headers,
+    },
+  })
+  const body = await parseApiResponse(response)
+
+  if (!response.ok) {
+    throw new Error(body.error ?? 'Request failed.')
   }
+
+  return body as T
+}
+
+async function parseApiResponse(response: Response): Promise<{ error?: string }> {
+  const contentType = response.headers.get('content-type') ?? ''
+
+  if (contentType.includes('application/json')) {
+    return (await response.json()) as { error?: string }
+  }
+
+  const fallbackMessage =
+    response.status === 404
+      ? 'API route not found. Make sure the Express backend is running.'
+      : 'API returned an unexpected response.'
+
+  return { error: fallbackMessage }
 }

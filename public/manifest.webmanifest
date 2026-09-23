@@ -2,7 +2,7 @@
   "name": "Event Attendance Check-In",
   "short_name": "Check-In",
   "description": "Scan Cvent badge QR codes and track event attendance.",
-  "start_url": "/",
+  "start_url": "/corporate/QRCode/",
   "display": "standalone",
   "background_color": "#eef2f7",
   "theme_color": "#2563eb",

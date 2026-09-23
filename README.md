@@ -1,136 +1,155 @@
 # Event Attendance Check-In
 
-A mobile-friendly React app for checking attendees into events by scanning Cvent badge QR codes. Staff sign in with Supabase Auth, upload an attendee Excel file, scan badges at the door, prevent duplicate check-ins, and export updated attendance data.
+A mobile-friendly event check-in app with server-side QR verification. Staff sign in with a PostgreSQL `public.users` account, scan badge QR codes from a phone browser, and the Node/Express backend marks attendees as checked in with duplicate prevention.
 
 ## Project Structure
 
 ```text
 .
+├── postgres/
+│   └── schema.sql
 ├── public/
-│   └── manifest.webmanifest
+│   ├── manifest.webmanifest
+│   └── nct.png
+├── server/
+│   └── index.js
 ├── src/
 │   ├── App.css
 │   ├── App.tsx
 │   ├── excel.ts
-│   ├── index.css
 │   ├── main.tsx
 │   ├── storage.ts
-│   ├── supabase.ts
 │   └── types.ts
-├── supabase/
-│   └── schema.sql
 ├── .env.example
 ├── index.html
 ├── package.json
 └── vite.config.ts
 ```
 
-## Supabase Setup
+## PostgreSQL Setup In pgAdmin
 
-1. Create a Supabase project at [supabase.com](https://supabase.com).
-2. Open the Supabase SQL Editor.
-3. Run the full SQL script in `supabase/schema.sql`.
-4. Go to Authentication settings and disable public signup if you only want manually created staff accounts.
-5. Create staff users in Supabase Authentication.
+Run `postgres/schema.sql` in the target database. The app expects these main tables:
 
-The schema enables Row Level Security. Only authenticated Supabase users can read attendees, upload/import attendees, update check-ins, clear data, or change the event name.
+- `public.users`: staff login accounts with `email`, `password_hash`, `role`, and optional `client_id`.
+- `public.attendees`: attendee data and check-in status.
+- `public.scan_attempts`: audit/rate-limit log with hashed QR values.
+- `public.app_settings`: event name.
 
-## Local Environment
+Use `role = 'admin'` for users who can view/export/clear attendees and edit the event name. Other roles are treated as scanner-only users.
+
+Minimum attendee columns are `id`, `name`, and `qr_code`. The database trigger fills `qr_code_normalized` automatically from `qr_code`.
+
+## Environment Variables
 
 Copy `.env.example` to `.env`:
-
-```bash
-cp .env.example .env
-```
-
-On Windows PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Fill in these values from Supabase Project Settings > API:
+Fill in:
 
-```bash
-VITE_SUPABASE_URL=https://your-project-ref.supabase.co
-VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
+```env
+DATABASE_URL=postgres://user:password@host:5432/database
+JWT_SECRET=replace-with-a-random-string-at-least-32-characters
+SCAN_RATE_LIMIT_PER_MINUTE=60
+POSTGRES_SSL=true
+PORT=3001
+BASE_PATH=/corporate/QRCode
 ```
 
-Use the anon key only. Do not put the Supabase service role key in this frontend app or in Vercel client environment variables.
+Set `POSTGRES_SSL=false` if PostgreSQL is on the same Linux server and does not use SSL.
 
-## Install and Run
+Do not put secrets in `public/`. Anything inside `public/` is served on the live website.
+
+## Local Development
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open the local URL printed by Vite. Sign in with a Supabase staff account before using the scanner or admin page.
+Open:
 
-## Build
+```text
+http://localhost:5173/corporate/QRCode/
+```
+
+Health check:
+
+```text
+http://localhost:5173/corporate/QRCode/api/health
+http://localhost:5173/corporate/QRCode/api/health/db
+```
+
+`npm run dev` starts both the Express API and the Vite frontend. Vite proxies `/corporate/QRCode/api/*` requests to Express.
+
+## Production Run
 
 ```bash
 npm run build
-npm run preview
+npm start
 ```
 
-## Deploy to Vercel
+Open:
 
-1. Push this repository to GitHub.
-2. Go to [vercel.com](https://vercel.com) and import the GitHub repository.
-3. Use these build settings:
-   - Framework Preset: `Vite`
-   - Build Command: `npm run build`
-   - Output Directory: `dist`
-4. Add these Vercel environment variables:
-   - `VITE_SUPABASE_URL`
-   - `VITE_SUPABASE_ANON_KEY`
-5. Deploy.
+```text
+http://localhost:3001/corporate/QRCode/
+```
 
-Vercel provides HTTPS automatically, which is required for mobile camera access outside `localhost`.
+## Linux Deployment
 
-## Add to Mobile Device
+On the Linux server:
 
-Open the Vercel URL on the phone:
+```bash
+cd /var/www/qr-code
+npm install
+npm run build
+npm prune --omit=dev
+npm start
+```
 
-- iPhone Safari: Share button > Add to Home Screen
-- Android Chrome: menu > Add to Home screen or Install app
+For production, run it with a process manager such as `pm2`:
 
-The app includes a web manifest so it can launch like a mobile web app.
+```bash
+npm install -g pm2
+pm2 start server/index.js --name qr-code-checkin
+pm2 save
+```
 
-## Excel Import Format
+Example Nginx reverse proxy:
 
-Upload `.xlsx`, `.xls`, or `.csv` files from the Admin page. The first sheet is imported. The app detects common Cvent-style headers, including:
+```nginx
+location /corporate/QRCode/ {
+    proxy_pass http://127.0.0.1:3001/corporate/QRCode/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
 
-- Attendee name: `Attendee Name`, `Full Name`, `Name`, or `First Name` plus `Last Name`
-- Email or ID: `Email`, `Email Address`, `Attendee ID`, `Registration ID`, `Confirmation Number`
-- QR code: `QR Code`, `QR Code Value`, `Cvent QR Code`, `Badge Code`, `Barcode`, `Code`
-- Optional fields: `Company`, `Organization`, `Ticket Type`, `Registration Type`, `Attendee Type`
-
-Rows without a QR code are skipped. Duplicate QR code values are skipped with an import warning. Uploading a new file replaces the current shared attendee list.
+Use HTTPS for the live URL. Phone camera access requires HTTPS outside `localhost`.
 
 ## How It Works
 
-1. Staff sign in with Supabase email/password.
-2. Admin uploads the attendee export.
-3. Staff open the Check-In page and tap Start Camera.
-4. The scanner reads the Cvent badge QR code.
-5. If the code matches, Supabase stores `checked_in`, `check_in_time`, and the staff user ID.
-6. If the attendee is scanned again, the app shows an already checked-in warning.
-7. Admin exports CSV or Excel after the event.
-
-## Security Notes
-
-- All app data is stored in Supabase, not browser `localStorage`.
-- Row Level Security allows database access only for authenticated staff.
-- The frontend uses the Supabase anon key with RLS policies.
-- Keep the service role key private and server-only.
-- Disable public signup for stricter event staff control.
-- Use HTTPS hosting through Vercel for mobile camera support.
+1. Staff sign in with email/password.
+2. The backend checks `public.users.password_hash` with bcrypt.
+3. A signed HTTP-only session cookie is created.
+4. Scanner devices call `/corporate/QRCode/api/verify-scan` with only the scanned QR value.
+5. The backend rate-limits the staff user, hashes the scanned QR for audit logging, checks PostgreSQL, and atomically marks the attendee checked in.
+6. The browser receives only minimal data: status, attendee name, and check-in time.
+7. Duplicate scans are rejected server-side.
+8. Admin users can view/search/export attendees.
 
 ## Dependencies
 
 - React and Vite for the mobile web app
-- Supabase Auth and Postgres for staff login and shared storage
+- Node.js and Express for the Linux backend
+- PostgreSQL managed with pgAdmin
+- `pg` for database access
+- `bcryptjs` for password verification
+- `jose` for signed sessions
 - `@zxing/browser` for phone-camera QR scanning
-- `xlsx` SheetJS for Excel and CSV import/export
+- `xlsx` SheetJS for Excel export

@@ -2,25 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { BrowserQRCodeReader } from '@zxing/browser'
 import type { IScannerControls } from '@zxing/browser'
-import type { User } from '@supabase/supabase-js'
 import './App.css'
+import { exportAttendeesAsCsv, exportAttendeesAsXlsx, normalizeCode, parseAttendeeWorkbook } from './excel'
 import {
-  buildCodeCandidates,
-  exportAttendeesAsCsv,
-  exportAttendeesAsXlsx,
-  normalizeCode,
-  parseAttendeeWorkbook,
-} from './excel'
-import {
-  checkInAttendee,
   clearAttendees,
+  importAttendees,
+  loadAttendanceSummary,
   loadAttendees,
+  loadCurrentUser,
   loadEventName,
-  replaceAttendees,
   saveEventName,
+  signIn,
+  signOut,
+  verifyScan,
 } from './storage'
-import { isSupabaseConfigured, supabase } from './supabase'
-import type { Attendee, ScanResult } from './types'
+import type { AttendanceSummary, Attendee, AuthUser, MinimalScannedAttendee, ScanResult } from './types'
 
 type AppView = 'scanner' | 'admin'
 
@@ -31,8 +27,9 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 
 const initialScanResult: ScanResult = {
   type: 'idle',
-  message: 'Sign in, upload your attendee Excel file, then start scanning badges.',
+  message: 'Sign in, load attendees from the secure database, then start scanning badges.',
 }
+const logoSrc = `${import.meta.env.BASE_URL}nct.png`
 
 function formatDateTime(value: string | null) {
   if (!value) {
@@ -51,10 +48,7 @@ function App() {
   const [cameraError, setCameraError] = useState('')
   const [manualCode, setManualCode] = useState('')
   const [search, setSearch] = useState('')
-  const [importWarnings, setImportWarnings] = useState<string[]>([])
-  const [importMessage, setImportMessage] = useState('')
-  const [isImporting, setIsImporting] = useState(false)
-  const [user, setUser] = useState<User | null>(null)
+  const [user, setUser] = useState<AuthUser | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
   const [authEmail, setAuthEmail] = useState('')
   const [authPassword, setAuthPassword] = useState('')
@@ -62,13 +56,25 @@ function App() {
   const [dataLoading, setDataLoading] = useState(false)
   const [dataError, setDataError] = useState('')
   const [eventNameStatus, setEventNameStatus] = useState('')
-  const attendeesRef = useRef(attendees)
+  const [summary, setSummary] = useState<AttendanceSummary>({
+    total: 0,
+    checkedIn: 0,
+    notCheckedIn: 0,
+  })
+  const [checkInToast, setCheckInToast] = useState<MinimalScannedAttendee | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const controlsRef = useRef<IScannerControls | null>(null)
   const lastScanRef = useRef({ code: '', scannedAt: 0 })
+  const toastTimeoutRef = useRef<number | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [importLoading, setImportLoading] = useState(false)
+  const [importSuccess, setImportSuccess] = useState('')
+  const [importError, setImportError] = useState('')
+  const [importWarnings, setImportWarnings] = useState<string[]>([])
 
-  const checkedInCount = attendees.filter((attendee) => attendee.checkedIn).length
-  const notCheckedInCount = attendees.length - checkedInCount
+  const isAdmin = user?.role === 'admin'
+  const checkedInCount = summary.checkedIn
+  const notCheckedInCount = summary.notCheckedIn
 
   const filteredAttendees = useMemo(() => {
     const term = search.trim().toLowerCase()
@@ -92,9 +98,14 @@ function App() {
     )
   }, [attendees, search])
 
-  useEffect(() => {
-    attendeesRef.current = attendees
-  }, [attendees])
+  useEffect(
+    () => () => {
+      if (toastTimeoutRef.current) {
+        window.clearTimeout(toastTimeoutRef.current)
+      }
+    },
+    [],
+  )
 
   const stopCamera = useCallback(() => {
     controlsRef.current?.stop()
@@ -112,55 +123,51 @@ function App() {
     setDataError('')
 
     try {
-      const [nextEventName, nextAttendees] = await Promise.all([loadEventName(), loadAttendees()])
+      const [nextEventName, nextSummary, nextAttendees] = await Promise.all([
+        loadEventName(),
+        loadAttendanceSummary(),
+        user.role === 'admin' ? loadAttendees() : Promise.resolve([]),
+      ])
+
+      if (user.role !== 'admin') {
+        setView('scanner')
+      }
+
       setEventName(nextEventName)
+      setSummary(nextSummary)
       setAttendees(nextAttendees)
       setScanResult((currentResult) =>
         currentResult.type === 'idle'
           ? {
               type: 'idle',
               message:
-                nextAttendees.length > 0
+                nextSummary.total > 0
                   ? 'Attendee list loaded. Start camera scanning when ready.'
-                  : 'Upload your attendee Excel file before scanning.',
+                  : 'No attendees found in the database. Add attendee rows before scanning.',
             }
           : currentResult,
       )
     } catch (error) {
-      setDataError(error instanceof Error ? error.message : 'Could not load Supabase data.')
+      setDataError(error instanceof Error ? error.message : 'Could not load database data.')
     } finally {
       setDataLoading(false)
     }
   }, [user])
 
   useEffect(() => {
-    if (!isSupabaseConfigured) {
-      setAuthLoading(false)
-      return undefined
-    }
-
     let mounted = true
 
-    supabase.auth.getSession().then(({ data }) => {
+    loadCurrentUser().then((currentUser) => {
       if (!mounted) {
         return
       }
 
-      setUser(data.session?.user ?? null)
+      setUser(currentUser)
       setAuthLoading(false)
-    })
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null)
-      setAuthLoading(false)
-      setAuthError('')
     })
 
     return () => {
       mounted = false
-      subscription.unsubscribe()
     }
   }, [])
 
@@ -170,6 +177,11 @@ function App() {
     } else {
       stopCamera()
       setAttendees([])
+      setSummary({
+        total: 0,
+        checkedIn: 0,
+        notCheckedIn: 0,
+      })
       setScanResult(initialScanResult)
     }
   }, [refreshData, stopCamera, user])
@@ -178,22 +190,19 @@ function App() {
     event.preventDefault()
     setAuthError('')
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email: authEmail.trim(),
-      password: authPassword,
-    })
-
-    if (error) {
-      setAuthError(error.message)
-      return
+    try {
+      const signedInUser = await signIn(authEmail.trim(), authPassword)
+      setUser(signedInUser)
+      setAuthPassword('')
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Unable to sign in.')
     }
-
-    setAuthPassword('')
   }
 
   async function handleSignOut() {
     stopCamera()
-    await supabase.auth.signOut()
+    await signOut()
+    setUser(null)
   }
 
   async function handleEventNameBlur() {
@@ -204,7 +213,7 @@ function App() {
     setEventNameStatus('Saving...')
 
     try {
-      await saveEventName(eventName.trim() || 'Event Check-In', user.id)
+      await saveEventName(eventName.trim() || 'Event Check-In')
       setEventNameStatus('Saved')
       window.setTimeout(() => setEventNameStatus(''), 1800)
     } catch (error) {
@@ -235,59 +244,56 @@ function App() {
         scannedAt: now,
       }
 
-      const currentAttendees = attendeesRef.current
-      const scannedCandidates = new Set(buildCodeCandidates(scannedCode))
-      const match = currentAttendees.find((attendee) =>
-        buildCodeCandidates(attendee.qrCode).some((candidate) => scannedCandidates.has(candidate)),
-      )
-
-      if (!match) {
-        setScanResult({
-          type: 'not-found',
-          scannedCode,
-          message: 'Attendee not found. Check the badge or scan again.',
-        })
-        return
-      }
-
-      if (match.checkedIn) {
-        setScanResult({
-          type: 'duplicate',
-          attendee: match,
-          message: `${match.name} was already checked in at ${formatDateTime(match.checkInTime)}.`,
-        })
-        return
-      }
-
       try {
-        const checkedInAttendee = await checkInAttendee(match.id, user.id)
+        const response = await verifyScan(scannedCode)
 
-        if (!checkedInAttendee) {
-          const latestAttendees = await loadAttendees()
-          const latestMatch = latestAttendees.find((attendee) => attendee.id === match.id) ?? match
+        if (response.status === 'not_found') {
+          setScanResult({
+            type: 'not-found',
+            scannedCode,
+            message: 'Attendee not found. Check the badge or scan again.',
+          })
+          return
+        }
 
-          setAttendees(latestAttendees)
+        if (response.status === 'rate_limited') {
+          setScanResult({
+            type: 'not-found',
+            scannedCode,
+            message: `Too many scan attempts. Try again in ${response.retryAfterSeconds} seconds.`,
+          })
+          return
+        }
+
+        if (response.status === 'duplicate') {
           setScanResult({
             type: 'duplicate',
-            attendee: latestMatch,
-            message: `${latestMatch.name} was already checked in at ${formatDateTime(
-              latestMatch.checkInTime,
+            attendee: response.attendee,
+            message: `${response.attendee.name} was already checked in at ${formatDateTime(
+              response.attendee.checkInTime,
             )}.`,
           })
           return
         }
 
-        const nextAttendees = currentAttendees.map((attendee) =>
-          attendee.id === match.id ? checkedInAttendee : attendee,
-        )
-
-        attendeesRef.current = nextAttendees
-        setAttendees(nextAttendees)
         setScanResult({
           type: 'success',
-          attendee: checkedInAttendee,
-          message: `${checkedInAttendee.name} is checked in.`,
+          attendee: response.attendee,
+          message: `${response.attendee.name} is checked in.`,
         })
+        setCheckInToast(response.attendee)
+        loadAttendanceSummary()
+          .then(setSummary)
+          .catch(() => undefined)
+
+        if (toastTimeoutRef.current) {
+          window.clearTimeout(toastTimeoutRef.current)
+        }
+
+        toastTimeoutRef.current = window.setTimeout(() => {
+          setCheckInToast(null)
+          toastTimeoutRef.current = null
+        }, 2600)
       } catch (error) {
         setScanResult({
           type: 'not-found',
@@ -358,41 +364,47 @@ function App() {
     }
   }, [cameraOn, handleQrScan])
 
-  async function handleFileUpload(file: File | undefined) {
-    if (!file) {
-      return
-    }
-
-    setIsImporting(true)
-    setImportMessage('')
-    setImportWarnings([])
-
-    try {
-      const summary = await parseAttendeeWorkbook(file)
-      await replaceAttendees(summary.attendees)
-      setAttendees(summary.attendees)
-      setImportWarnings(summary.warnings)
-      setImportMessage(`Imported ${summary.attendees.length} attendees from ${summary.fileName}.`)
-      setScanResult({
-        type: 'idle',
-        message:
-          summary.attendees.length > 0
-            ? 'Attendee list loaded. Start camera scanning when ready.'
-            : 'No attendees were imported. Check the Excel headers and QR code column.',
-      })
-    } catch (error) {
-      setImportMessage(
-        error instanceof Error ? error.message : 'The Excel file could not be imported.',
-      )
-    } finally {
-      setIsImporting(false)
-    }
-  }
-
   function handleManualSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     handleQrScan(manualCode)
     setManualCode('')
+  }
+
+  async function handleFileSelect(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    if (!file) {
+      return
+    }
+
+    setImportLoading(true)
+    setImportSuccess('')
+    setImportError('')
+    setImportWarnings([])
+
+    try {
+      const parsed = await parseAttendeeWorkbook(file)
+      setImportWarnings(parsed.warnings)
+
+      if (parsed.attendees.length === 0) {
+        setImportError(
+          'No valid attendees found in the file. Ensure your file contains a QR Code column and attendee rows.',
+        )
+        return
+      }
+
+      const response = await importAttendees(parsed.attendees)
+      setImportSuccess(
+        response.message || `Successfully imported ${response.count} attendee${response.count === 1 ? '' : 's'}.`,
+      )
+      await refreshData()
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : 'Failed to import attendee file.')
+    } finally {
+      setImportLoading(false)
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
+    }
   }
 
   async function handleClearData() {
@@ -406,27 +418,15 @@ function App() {
       stopCamera()
       await clearAttendees()
       setAttendees([])
-      setImportWarnings([])
-      setImportMessage('')
+      setSummary({
+        total: 0,
+        checkedIn: 0,
+        notCheckedIn: 0,
+      })
       setScanResult(initialScanResult)
     } catch (error) {
       setDataError(error instanceof Error ? error.message : 'Could not clear attendees.')
     }
-  }
-
-  if (!isSupabaseConfigured) {
-    return (
-      <div className="auth-shell">
-        <section className="auth-card">
-          <p className="eyebrow">Setup Required</p>
-          <h1>Connect Supabase</h1>
-          <p>
-            Add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` to your local `.env` file and to
-            Vercel environment variables.
-          </p>
-        </section>
-      </div>
-    )
   }
 
   if (authLoading) {
@@ -445,9 +445,17 @@ function App() {
       <div className="auth-shell">
         <form className="auth-card" onSubmit={handleSignIn}>
           <div>
+            <img
+              className="brand-logo auth-logo"
+              src={logoSrc}
+              alt="NCT"
+              onError={(event) => {
+                event.currentTarget.style.display = 'none'
+              }}
+            />
             <p className="eyebrow">Staff Login</p>
             <h1>Sign in to check in attendees</h1>
-            <p>Use a staff account created in Supabase Auth.</p>
+            <p>Use your staff account for this event.</p>
           </div>
 
           <label>
@@ -484,24 +492,44 @@ function App() {
 
   return (
     <div className="app-shell">
+      {checkInToast ? (
+        <div className="checkin-toast" role="status" aria-live="polite">
+          <span>Checked in</span>
+          <strong>{checkInToast.name}</strong>
+        </div>
+      ) : null}
+
       <header className="app-header">
-        <div>
-          <label className="eyebrow" htmlFor="event-name">
-            Event
-          </label>
-          <input
-            id="event-name"
-            className="event-name-input"
-            value={eventName}
-            onChange={(event) => setEventName(event.target.value)}
-            onBlur={handleEventNameBlur}
-            aria-label="Event name"
+        <div className="brand-block">
+          <img
+            className="brand-logo"
+            src={logoSrc}
+            alt="NCT"
+            onError={(event) => {
+              event.currentTarget.style.display = 'none'
+            }}
           />
-          {eventNameStatus ? <span className="save-status">{eventNameStatus}</span> : null}
+          <div>
+            {isAdmin ? (
+              <input
+                id="event-name"
+                className="event-name-input"
+                value={eventName}
+                onChange={(event) => setEventName(event.target.value)}
+                onBlur={handleEventNameBlur}
+                aria-label="Event name"
+              />
+            ) : (
+              <span className="event-name-input" role="heading" aria-level={1}>
+                {eventName}
+              </span>
+            )}
+            {eventNameStatus ? <span className="save-status">{eventNameStatus}</span> : null}
+          </div>
         </div>
 
         <div className="header-actions">
-          <nav className="top-tabs" aria-label="Main navigation">
+          <nav className={isAdmin ? 'top-tabs' : 'top-tabs single'} aria-label="Main navigation">
             <button
               type="button"
               className={view === 'scanner' ? 'active' : ''}
@@ -509,18 +537,20 @@ function App() {
             >
               Check-In
             </button>
-            <button
-              type="button"
-              className={view === 'admin' ? 'active' : ''}
-              onClick={() => setView('admin')}
-            >
-              Admin
-            </button>
+            {isAdmin ? (
+              <button
+                type="button"
+                className={view === 'admin' ? 'active' : ''}
+                onClick={() => setView('admin')}
+              >
+                Admin
+              </button>
+            ) : null}
           </nav>
           <div className="staff-chip">
             <span>{user.email}</span>
             <button type="button" onClick={handleSignOut}>
-              Sign Out
+              Log out
             </button>
           </div>
         </div>
@@ -533,7 +563,7 @@ function App() {
         <section className="stats-grid" aria-label="Attendance summary">
           <div className="stat-card">
             <span>Total</span>
-            <strong>{attendees.length}</strong>
+            <strong>{summary.total}</strong>
           </div>
           <div className="stat-card checked">
             <span>Checked In</span>
@@ -573,7 +603,7 @@ function App() {
                 <button
                   type="button"
                   className="primary-button"
-                  disabled={attendees.length === 0 || cameraOn}
+                  disabled={summary.total === 0 || cameraOn}
                   onClick={() => setCameraOn(true)}
                 >
                   Start Camera
@@ -603,8 +633,6 @@ function App() {
               {scanResult.type === 'success' || scanResult.type === 'duplicate' ? (
                 <div className="attendee-focus">
                   <strong>{scanResult.attendee.name}</strong>
-                  <span>{scanResult.attendee.email || scanResult.attendee.uniqueId || 'No email or ID'}</span>
-                  <span>{scanResult.attendee.company}</span>
                   <span>Checked in: {formatDateTime(scanResult.attendee.checkInTime)}</span>
                 </div>
               ) : null}
@@ -622,7 +650,7 @@ function App() {
                   onChange={(event) => setManualCode(event.target.value)}
                   placeholder="Paste or type a QR code value"
                 />
-                <button type="submit" disabled={!manualCode.trim() || attendees.length === 0}>
+                <button type="submit" disabled={!manualCode.trim() || summary.total === 0}>
                   Check In
                 </button>
               </div>
@@ -633,39 +661,48 @@ function App() {
             <div className="panel upload-panel">
               <div>
                 <p className="eyebrow">Back Office</p>
-                <h1>Upload attendee Excel</h1>
+                <h1>Import Attendee List</h1>
                 <p>
-                  Import a Cvent export with attendee name, email or ID, and a QR code value column.
-                  Uploading replaces the current shared attendee list.
+                  Upload an Excel (.xlsx, .xls) or CSV file with attendee badges. New attendees will be added
+                  and existing attendees will have their details updated while preserving their check-in status.
                 </p>
               </div>
 
               <label className="file-upload">
                 <input
+                  ref={fileInputRef}
                   type="file"
                   accept=".xlsx,.xls,.csv"
-                  onChange={(event) => {
-                    handleFileUpload(event.target.files?.[0])
-                    event.currentTarget.value = ''
-                  }}
+                  disabled={importLoading}
+                  onChange={handleFileSelect}
                 />
-                <span>{isImporting ? 'Importing...' : 'Choose Excel or CSV file'}</span>
+                <span>{importLoading ? 'Importing attendees...' : 'Upload Excel or CSV File'}</span>
               </label>
 
-              {importMessage ? <p className="alert success">{importMessage}</p> : null}
+              {importSuccess ? <div className="alert success">{importSuccess}</div> : null}
+              {importError ? <div className="alert error">{importError}</div> : null}
               {importWarnings.length > 0 ? (
                 <div className="alert warning">
-                  <strong>Import warnings</strong>
+                  <strong>Import Warnings:</strong>
                   <ul>
-                    {importWarnings.slice(0, 6).map((warning) => (
-                      <li key={warning}>{warning}</li>
+                    {importWarnings.slice(0, 8).map((warning, index) => (
+                      <li key={index}>{warning}</li>
                     ))}
+                    {importWarnings.length > 8 ? (
+                      <li>...and {importWarnings.length - 8} more warning(s).</li>
+                    ) : null}
                   </ul>
-                  {importWarnings.length > 6 ? (
-                    <span>{importWarnings.length - 6} more warnings hidden.</span>
-                  ) : null}
                 </div>
               ) : null}
+
+              <div className="alert warning">
+                Recognized columns: Name (or First/Last Name) and QR Code (or Badge Code, Barcode).
+                Optional columns: Email, Attendee ID, Company, Ticket Type.
+              </div>
+
+              <button type="button" className="secondary-button" onClick={refreshData}>
+                Reload Database Attendees
+              </button>
             </div>
 
             <div className="panel list-panel">
