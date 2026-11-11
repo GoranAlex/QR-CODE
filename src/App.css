@@ -739,14 +739,14 @@ h2 {
 .attendee-badges .status.goodie-collected,
 .attendee-badges .status.goodie-eligible,
 .attendee-badges .status.goodie-ineligible {
-  background: #f3f4f6 !important;
-  color: #374151 !important;
-  border: 1px solid #e5e7eb !important;
+  background: #f1f5f9 !important;
+  color: #334155 !important;
+  border: none !important;
   border-radius: 9999px !important;
   font-size: 0.74rem;
-  font-weight: 500;
-  padding: 3px 10px;
-  min-height: 26px;
+  font-weight: 550;
+  padding: 4px 11px;
+  min-height: 25px;
   box-shadow: none !important;
   display: inline-flex;
   align-items: center;
@@ -755,7 +755,7 @@ h2 {
 }
 
 .attendee-badges .status .status-inline-icon {
-  color: #6b7280 !important;
+  color: #64748b !important;
   flex-shrink: 0;
 }
 
@@ -1460,18 +1460,20 @@ input:focus {
   width: fit-content;
   max-width: 100%;
   font-size: 0.74rem;
-  font-weight: 600;
-  padding: 2px 8px;
+  font-weight: 550;
+  padding: 3px 10px;
+  min-height: 23px;
   border-radius: 9999px;
-  background: #f3f4f6;
-  color: #374151;
-  border: 1px solid #e5e7eb;
+  background: #f1f5f9;
+  color: #334155;
+  border: none !important;
+  line-height: 1;
 }
 
 .detail-value.tag.canceled {
-  background: #fef2f2 !important;
-  color: #b91c1c !important;
-  border: 1px solid rgba(239, 68, 68, 0.25) !important;
+  background: #fee2e2 !important;
+  color: #dc2626 !important;
+  border: none !important;
   font-weight: 600;
 }
 
@@ -1910,9 +1912,11 @@ input:focus {
 
   .attendee-badges .status {
     font-size: 0.74rem;
-    padding: 3px 10px;
-    min-height: 26px;
+    font-weight: 550;
+    padding: 4px 10px;
+    min-height: 25px;
     border-radius: 9999px;
+    border: none !important;
   }
 
   main {
@@ -2252,15 +2256,15 @@ input:focus {
 }
 
 [data-theme='dark'] .detail-value.tag {
-  background: #1e293b;
+  background: rgba(255, 255, 255, 0.08);
   color: #cbd5e1;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: none !important;
 }
 
 [data-theme='dark'] .detail-value.tag.canceled {
-  background: rgba(239, 68, 68, 0.15) !important;
+  background: rgba(239, 68, 68, 0.18) !important;
   color: #fca5a5 !important;
-  border: 1px solid rgba(239, 68, 68, 0.3) !important;
+  border: none !important;
 }
 
 [data-theme='dark'] .detail-value.code {
@@ -2341,9 +2345,9 @@ input:focus {
 [data-theme='dark'] .attendee-badges .status.goodie-collected,
 [data-theme='dark'] .attendee-badges .status.goodie-eligible,
 [data-theme='dark'] .attendee-badges .status.goodie-ineligible {
-  background: #1e293b !important;
+  background: rgba(255, 255, 255, 0.08) !important;
   color: #cbd5e1 !important;
-  border-color: rgba(255, 255, 255, 0.1) !important;
+  border: none !important;
 }
 
 [data-theme='dark'] .attendee-badges .status .status-inline-icon {
