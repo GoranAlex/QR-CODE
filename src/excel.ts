@@ -41,13 +41,28 @@ const headerAliases = {
   company: ['company', 'organization', 'organisation', 'account', 'employer'],
   ticketType: [
     'ticket type',
-    'admission item',
     'registration type',
     'attendee type',
     'pass type',
     'category',
   ],
+  admissionItem: ['admission item', 'admission', 'interval', 'interval orar', 'admissionitem'],
+  sessions: ['sessions', 'session', 'programare k scan', 'programare', 'k scan', 'kscan'],
+  photo: ['photo', 'prelucrare foto', 'foto', 'photo processing'],
+  checkedIn: ['check-in', 'checked in', 'check in', 'prezent', 'prezenta', 'attended', 'sosire'],
+  checkInTime: ['check-in time', 'check in time', 'checkin time', 'ora check in', 'data check in', 'check-in date', 'check in date', 'timp check in', 'cand a fost check in'],
+  goodieBag: ['goodie bag', 'goodiebag', 'goodie-bag', 'cadou', 'gift', 'pachet', 'pachete'],
 } as const
+
+function isTruthyValue(value: unknown): boolean {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value > 0
+  if (typeof value === 'string') {
+    const v = value.trim().toLowerCase()
+    return ['da', 'yes', 'true', '1', 'checked', 'prezent', 'ridicat', 'ok'].includes(v)
+  }
+  return false
+}
 
 function normalizeHeader(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]/g, '')
@@ -199,6 +214,12 @@ export async function parseAttendeeWorkbook(file: File): Promise<ImportSummary> 
   const qrCodeHeader = findHeader(headers, headerAliases.qrCode)
   const companyHeader = findHeader(headers, headerAliases.company)
   const ticketTypeHeader = findHeader(headers, headerAliases.ticketType)
+  const admissionItemHeader = findHeader(headers, headerAliases.admissionItem)
+  const sessionsHeader = findHeader(headers, headerAliases.sessions)
+  const photoHeader = findHeader(headers, headerAliases.photo)
+  const checkedInHeader = findHeader(headers, headerAliases.checkedIn)
+  const checkInTimeHeader = findHeader(headers, headerAliases.checkInTime)
+  const goodieBagHeader = findHeader(headers, headerAliases.goodieBag)
   const warnings: string[] = []
 
   if (!qrCodeHeader) {
@@ -221,6 +242,9 @@ export async function parseAttendeeWorkbook(file: File): Promise<ImportSummary> 
       const qrCode = qrCodeHeader ? cellToString(row[qrCodeHeader]) : ''
       const company = companyHeader ? cellToString(row[companyHeader]) : ''
       const ticketType = ticketTypeHeader ? cellToString(row[ticketTypeHeader]) : ''
+      const admissionItem = admissionItemHeader ? cellToString(row[admissionItemHeader]) : ''
+      const sessions = sessionsHeader ? cellToString(row[sessionsHeader]) : ''
+      const photo = photoHeader ? cellToString(row[photoHeader]) : ''
       const original = Object.fromEntries(headers.map((header) => [header, cellToString(row[header])]))
 
       if (!qrCode) {
@@ -237,6 +261,18 @@ export async function parseAttendeeWorkbook(file: File): Promise<ImportSummary> 
 
       seenQrCodes.add(normalizedQrCode)
 
+      const rawCheckInTime = checkInTimeHeader ? cellToString(row[checkInTimeHeader]) : ''
+      const parsedCheckInTime =
+        rawCheckInTime && !Number.isNaN(new Date(rawCheckInTime).getTime())
+          ? new Date(rawCheckInTime).toISOString()
+          : null
+      const checkedIn = checkedInHeader
+        ? isTruthyValue(row[checkedInHeader])
+        : Boolean(parsedCheckInTime || (rawCheckInTime && rawCheckInTime.toLowerCase() !== 'nu' && rawCheckInTime.toLowerCase() !== 'neprezentat'))
+      const checkInTime = parsedCheckInTime || (checkedIn ? new Date().toISOString() : null)
+      const goodieBag = goodieBagHeader ? isTruthyValue(row[goodieBagHeader]) : false
+      const goodieBagTime = goodieBag ? new Date().toISOString() : null
+
       return {
         id: makeAttendeeId(email, uniqueId, qrCode, sourceRow),
         name,
@@ -245,8 +281,13 @@ export async function parseAttendeeWorkbook(file: File): Promise<ImportSummary> 
         qrCode,
         company,
         ticketType,
-        checkedIn: false,
-        checkInTime: null,
+        admissionItem,
+        sessions,
+        photo,
+        checkedIn,
+        checkInTime,
+        goodieBag,
+        goodieBagTime,
         importedAt: new Date().toISOString(),
         sourceRow,
         original,
@@ -261,6 +302,23 @@ export async function parseAttendeeWorkbook(file: File): Promise<ImportSummary> 
   }
 }
 
+function formatExportDate(value: string | null) {
+  if (!value) {
+    return ''
+  }
+
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date)
+}
+
 export function buildExportRows(attendees: Attendee[]) {
   return attendees.map((attendee) => ({
     Name: attendee.name,
@@ -269,8 +327,17 @@ export function buildExportRows(attendees: Attendee[]) {
     'QR Code': attendee.qrCode,
     Company: attendee.company,
     'Ticket Type': attendee.ticketType,
+    Interval: attendee.admissionItem,
+    'Programare K Scan': attendee.sessions,
+    'Prelucrare foto': attendee.photo,
     Status: attendee.checkedIn ? 'Checked In' : 'Not Checked In',
-    'Check-In Time': attendee.checkInTime ?? '',
+    'Check-In Time': formatExportDate(attendee.checkInTime),
+    'Goodie Bag': attendee.goodieBag
+      ? 'Ridicat'
+      : attendee.checkedIn
+        ? 'Eligibil (Neridicat)'
+        : 'Neeligibil (Fără Check-In)',
+    'Data/Ora Goodie Bag': formatExportDate(attendee.goodieBagTime),
   }))
 }
 

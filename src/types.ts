@@ -8,8 +8,13 @@ export type Attendee = {
   qrCode: string
   company: string
   ticketType: string
+  admissionItem: string
+  sessions: string
+  photo: string
   checkedIn: boolean
   checkInTime: string | null
+  goodieBag: boolean
+  goodieBagTime: string | null
   importedAt: string
   sourceRow: number
   original: Record<string, string>
@@ -33,12 +38,25 @@ export type AttendanceSummary = {
   total: number
   checkedIn: number
   notCheckedIn: number
+  goodieBagCollected: number
+  goodieBagRemaining: number
 }
 
 export type MinimalScannedAttendee = {
+  id?: string
   name: string
+  qrCode?: string
+  checkedIn?: boolean
+  goodieBag?: boolean
   checkInTime: string | null
+  goodieBagTime?: string | null
+  ticketType: string
+  admissionItem: string
+  sessions: string
+  photo: string
 }
+
+export type ScanMode = 'checkin' | 'goodie_bag'
 
 export type ScanResult =
   | {
@@ -48,6 +66,21 @@ export type ScanResult =
     }
   | {
       type: 'duplicate'
+      attendee: MinimalScannedAttendee
+      message: string
+    }
+  | {
+      type: 'goodie_bag_collected'
+      attendee: MinimalScannedAttendee
+      message: string
+    }
+  | {
+      type: 'goodie_bag_duplicate'
+      attendee: MinimalScannedAttendee
+      message: string
+    }
+  | {
+      type: 'not_checked_in_for_goodie_bag'
       attendee: MinimalScannedAttendee
       message: string
     }
@@ -82,6 +115,18 @@ export type VerifyScanResponse =
       attendee: MinimalScannedAttendee
     }
   | {
+      status: 'goodie_bag_collected'
+      attendee: MinimalScannedAttendee
+    }
+  | {
+      status: 'goodie_bag_duplicate'
+      attendee: MinimalScannedAttendee
+    }
+  | {
+      status: 'not_checked_in_for_goodie_bag'
+      attendee: MinimalScannedAttendee
+    }
+  | {
       status: 'not_found'
     }
   | {
@@ -94,3 +139,4 @@ export type ImportAttendeesResponse = {
   count: number
   message?: string
 }
+

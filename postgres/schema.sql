@@ -31,9 +31,15 @@ create table if not exists public.attendees (
   qr_code_normalized text not null unique,
   company text not null default '',
   ticket_type text not null default '',
+  admission_item text not null default '',
+  sessions text not null default '',
+  photo text not null default '',
   checked_in boolean not null default false,
   check_in_time timestamptz,
   checked_in_by uuid references public.users(id),
+  goodie_bag boolean not null default false,
+  goodie_bag_time timestamptz,
+  goodie_bag_by uuid references public.users(id),
   imported_at timestamptz not null default now(),
   source_row integer not null default 0,
   original jsonb not null default '{}'::jsonb,
@@ -54,6 +60,9 @@ on public.attendees (qr_code_normalized);
 
 create index if not exists attendees_status_idx
 on public.attendees (checked_in);
+
+create index if not exists attendees_goodie_bag_idx
+on public.attendees (goodie_bag);
 
 create index if not exists attendees_search_idx on public.attendees
 using gin (

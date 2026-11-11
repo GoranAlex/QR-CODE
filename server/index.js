@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { apiMountPaths } from './paths.js'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import bcrypt from 'bcryptjs'
@@ -11,8 +12,8 @@ dotenv.config()
 
 const { Pool } = pg
 const app = express()
-const port = Number(process.env.PORT ?? 3001)
-const basePath = normalizeBasePath(process.env.BASE_PATH ?? '/corporate/QRCode')
+const port = Number(process.env.PORT ?? 30061)
+const basePath = normalizeBasePath(process.env.BASE_PATH ?? '/corporate/QrCode')
 const cookiePath = basePath || '/'
 const sessionCookieName = 'event_checkin_session'
 const sessionMaxAgeSeconds = 8 * 60 * 60
@@ -29,6 +30,7 @@ const isProduction = process.env.NODE_ENV === 'production'
 const useSecureCookies = process.env.COOKIE_SECURE === 'true' || isProduction
 
 app.set('trust proxy', 1)
+app.use(allowFrontendOrigin)
 app.use(express.json({ limit: '10mb' }))
 
 const pool = new Pool({
@@ -44,6 +46,37 @@ const pool = new Pool({
 pool.on('error', (err) => {
   console.error('Unexpected error on idle PostgreSQL client:', err)
 })
+
+async function ensureSchema() {
+  try {
+    await pool.query(`
+      ALTER TABLE public.attendees ADD COLUMN IF NOT EXISTS admission_item text NOT NULL DEFAULT '';
+      ALTER TABLE public.attendees ADD COLUMN IF NOT EXISTS sessions text NOT NULL DEFAULT '';
+      ALTER TABLE public.attendees ADD COLUMN IF NOT EXISTS photo text NOT NULL DEFAULT '';
+      ALTER TABLE public.attendees ADD COLUMN IF NOT EXISTS goodie_bag boolean NOT NULL DEFAULT false;
+      ALTER TABLE public.attendees ADD COLUMN IF NOT EXISTS goodie_bag_time timestamptz;
+      ALTER TABLE public.attendees ADD COLUMN IF NOT EXISTS goodie_bag_by uuid REFERENCES public.users(id);
+      CREATE INDEX IF NOT EXISTS attendees_goodie_bag_idx ON public.attendees (goodie_bag);
+    `)
+
+    const defaultPasswordHash = await bcrypt.hash('admin123', 10)
+    await pool.query(
+      `
+        INSERT INTO public.users (id, email, password_hash, role, must_change_password)
+        VALUES 
+          (gen_random_uuid(), 'adrian.ciurcanu@newconcepttravel.com', $1, 'admin', false),
+          (gen_random_uuid(), 'alexandru.goran@newconcepttravel.com', $1, 'admin', false)
+        ON CONFLICT (email) DO UPDATE
+        SET password_hash = excluded.password_hash,
+            role = excluded.role;
+      `,
+      [defaultPasswordHash],
+    )
+  } catch (err) {
+    console.warn('Database schema check warning:', err.message)
+  }
+}
+ensureSchema()
 
 const api = express.Router()
 
@@ -118,7 +151,7 @@ api.post('/login', async (req, res) => {
     const token = await createSessionToken(user)
 
     clearLoginAttempts(loginKey)
-    setSessionCookie(res, token)
+    setSessionCookie(res, token, req)
     res.json({ user })
   } catch (error) {
     res.status(500).json({
@@ -131,8 +164,8 @@ api.get('/me', requireUser, (req, res) => {
   res.json({ user: req.user })
 })
 
-api.post('/logout', (_req, res) => {
-  clearSessionCookie(res)
+api.post('/logout', (req, res) => {
+  clearSessionCookie(res, req)
   res.json({ ok: true })
 })
 
@@ -183,18 +216,24 @@ api.get('/summary', requireUser, async (_req, res) => {
       `
         select
           count(*)::text as total,
-          count(*) filter (where checked_in = true)::text as checked_in
+          count(*) filter (where checked_in = true)::text as checked_in,
+          count(*) filter (where goodie_bag = true)::text as goodie_bag_collected,
+          count(*) filter (where checked_in = true and goodie_bag = false)::text as goodie_bag_remaining
         from public.attendees
       `,
     )
     const row = result.rows[0]
     const total = Number(row?.total ?? 0)
     const checkedIn = Number(row?.checked_in ?? 0)
+    const goodieBagCollected = Number(row?.goodie_bag_collected ?? 0)
+    const goodieBagRemaining = Number(row?.goodie_bag_remaining ?? 0)
 
     res.json({
       total,
       checkedIn,
       notCheckedIn: Math.max(total - checkedIn, 0),
+      goodieBagCollected,
+      goodieBagRemaining,
     })
   } catch (error) {
     res.status(500).json({
@@ -203,7 +242,7 @@ api.get('/summary', requireUser, async (_req, res) => {
   }
 })
 
-api.get('/attendees', requireAdmin, async (_req, res) => {
+api.get('/attendees', requireUser, async (_req, res) => {
   try {
     const result = await query(
       `
@@ -215,8 +254,13 @@ api.get('/attendees', requireAdmin, async (_req, res) => {
           qr_code,
           company,
           ticket_type,
+          admission_item,
+          sessions,
+          photo,
           checked_in,
           check_in_time,
+          goodie_bag,
+          goodie_bag_time,
           imported_at,
           source_row,
           original
@@ -232,6 +276,92 @@ api.get('/attendees', requireAdmin, async (_req, res) => {
     })
   }
 })
+
+api.post('/attendees/:id/goodie-bag', requireUser, async (req, res) => {
+  try {
+    const attendeeId = typeof req.params.id === 'string' ? req.params.id.trim() : ''
+
+    if (!attendeeId) {
+      res.status(400).json({ error: 'Attendee ID is required.' })
+      return
+    }
+
+    const updateResult = await query(
+      `
+        update public.attendees
+        set goodie_bag = true,
+            goodie_bag_time = coalesce(goodie_bag_time, now()),
+            goodie_bag_by = coalesce(goodie_bag_by, $2),
+            checked_in = true,
+            check_in_time = coalesce(check_in_time, now()),
+            checked_in_by = coalesce(checked_in_by, $2),
+            updated_at = now()
+        where id = $1
+           or qr_code_normalized = lower(trim($1))
+           or qr_code = $1
+        returning id, name, ticket_type, admission_item, sessions, photo, checked_in, check_in_time, goodie_bag, goodie_bag_time, qr_code, original
+      `,
+      [attendeeId, req.user.id],
+    )
+
+    const updatedAttendee = updateResult.rows[0]
+    if (!updatedAttendee) {
+      res.status(404).json({ error: 'Attendee not found.' })
+      return
+    }
+
+    res.json({
+      status: 'goodie_bag_collected',
+      attendee: scanAttendeePayload(updatedAttendee),
+    })
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to award goodie bag.',
+    })
+  }
+})
+
+api.post('/attendees/:id/checkin', requireUser, async (req, res) => {
+  try {
+    const attendeeId = typeof req.params.id === 'string' ? req.params.id.trim() : ''
+
+    if (!attendeeId) {
+      res.status(400).json({ error: 'Attendee ID is required.' })
+      return
+    }
+
+    const updateResult = await query(
+      `
+        update public.attendees
+        set checked_in = true,
+            check_in_time = coalesce(check_in_time, now()),
+            checked_in_by = coalesce(checked_in_by, $2),
+            updated_at = now()
+        where id = $1
+           or qr_code_normalized = lower(trim($1))
+           or qr_code = $1
+        returning id, name, ticket_type, admission_item, sessions, photo, checked_in, check_in_time, goodie_bag, goodie_bag_time, qr_code, original
+      `,
+      [attendeeId, req.user.id],
+    )
+
+    const updatedAttendee = updateResult.rows[0]
+    if (!updatedAttendee) {
+      res.status(404).json({ error: 'Attendee not found.' })
+      return
+    }
+
+    res.json({
+      status: 'checked_in',
+      attendee: scanAttendeePayload(updatedAttendee),
+    })
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to check in attendee.',
+    })
+  }
+})
+
 
 api.delete('/attendees', requireAdmin, async (_req, res) => {
   try {
@@ -286,10 +416,31 @@ api.post('/attendees/import', requireAdmin, async (req, res) => {
       const company = typeof item.company === 'string' ? item.company.trim() : ''
       const ticketType = typeof item.ticketType === 'string' ? item.ticketType.trim() : ''
       const sourceRow = typeof item.sourceRow === 'number' ? item.sourceRow : 0
-      const original =
-        item.original && typeof item.original === 'object'
-          ? JSON.stringify(item.original)
-          : '{}'
+      const originalObject =
+        item.original && typeof item.original === 'object' ? item.original : {}
+      const admissionItem =
+        (typeof item.admissionItem === 'string' ? item.admissionItem.trim() : '') ||
+        readOriginalField(originalObject, ['admission item', 'admission', 'interval', 'interval orar', 'admissionitem'])
+      const sessions =
+        (typeof item.sessions === 'string' ? item.sessions.trim() : '') ||
+        readOriginalField(originalObject, ['sessions', 'session', 'programare k scan', 'programare', 'k scan', 'kscan'])
+      const photo =
+        (typeof item.photo === 'string' ? item.photo.trim() : '') ||
+        readOriginalField(originalObject, ['photo', 'prelucrare foto', 'foto', 'photo processing'])
+      const original = JSON.stringify(originalObject)
+
+      const checkedIn = Boolean(item.checkedIn)
+      const checkInTime = item.checkInTime
+        ? new Date(item.checkInTime).toISOString()
+        : checkedIn
+          ? new Date().toISOString()
+          : null
+      const goodieBag = Boolean(item.goodieBag)
+      const goodieBagTime = item.goodieBagTime
+        ? new Date(item.goodieBagTime).toISOString()
+        : goodieBag
+          ? new Date().toISOString()
+          : null
 
       validAttendees.push({
         id,
@@ -299,6 +450,13 @@ api.post('/attendees/import', requireAdmin, async (req, res) => {
         qrCode,
         company,
         ticketType,
+        admissionItem,
+        sessions,
+        photo,
+        checkedIn,
+        checkInTime,
+        goodieBag,
+        goodieBagTime,
         sourceRow,
         original,
       })
@@ -319,7 +477,7 @@ api.post('/attendees/import', requireAdmin, async (req, res) => {
       for (const att of chunk) {
         const offset = values.length
         valueClauses.push(
-          `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}::jsonb)`
+          `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}::jsonb, $${offset + 13}, $${offset + 14}, $${offset + 15}, $${offset + 16})`
         )
         values.push(
           att.id,
@@ -329,14 +487,21 @@ api.post('/attendees/import', requireAdmin, async (req, res) => {
           att.qrCode,
           att.company,
           att.ticketType,
+          att.admissionItem,
+          att.sessions,
+          att.photo,
           att.sourceRow,
           att.original,
+          att.checkedIn,
+          att.checkInTime,
+          att.goodieBag,
+          att.goodieBagTime,
         )
       }
 
       const insertQuery = `
         insert into public.attendees (
-          id, name, email, unique_id, qr_code, company, ticket_type, source_row, original
+          id, name, email, unique_id, qr_code, company, ticket_type, admission_item, sessions, photo, source_row, original, checked_in, check_in_time, goodie_bag, goodie_bag_time
         )
         values ${valueClauses.join(', ')}
         on conflict (qr_code_normalized) do update
@@ -346,8 +511,15 @@ api.post('/attendees/import', requireAdmin, async (req, res) => {
             qr_code = excluded.qr_code,
             company = excluded.company,
             ticket_type = excluded.ticket_type,
+            admission_item = excluded.admission_item,
+            sessions = excluded.sessions,
+            photo = excluded.photo,
             source_row = excluded.source_row,
             original = excluded.original,
+            checked_in = attendees.checked_in or excluded.checked_in,
+            check_in_time = coalesce(attendees.check_in_time, excluded.check_in_time),
+            goodie_bag = attendees.goodie_bag or excluded.goodie_bag,
+            goodie_bag_time = coalesce(attendees.goodie_bag_time, excluded.goodie_bag_time),
             updated_at = now()
       `
       const result = await client.query(insertQuery, values)
@@ -374,9 +546,11 @@ api.post('/attendees/import', requireAdmin, async (req, res) => {
 api.post('/verify-scan', requireUser, async (req, res) => {
   try {
     const scannedCode = typeof req.body?.code === 'string' ? req.body.code.trim() : ''
+    const candidateId = typeof req.body?.id === 'string' ? req.body.id.trim() : ''
+    const mode = req.body?.mode === 'goodie_bag' ? 'goodie_bag' : 'checkin'
 
-    if (!scannedCode) {
-      res.status(400).json({ error: 'Missing scanned QR code.' })
+    if (!scannedCode && !candidateId) {
+      res.status(400).json({ error: 'Missing scanned QR code or attendee ID.' })
       return
     }
 
@@ -400,23 +574,25 @@ api.post('/verify-scan', requireUser, async (req, res) => {
       return
     }
 
+    const codeToHash = scannedCode || candidateId
     await query(
       `
         insert into public.scan_attempts (staff_user_id, ip_address, code_hash)
         values ($1, $2, $3)
       `,
-      [req.user.id, getClientIp(req), hashValue(scannedCode)],
+      [req.user.id, getClientIp(req), hashValue(codeToHash)],
     )
 
     const candidates = buildCodeCandidates(scannedCode)
     const matchResult = await query(
       `
-        select id, name, checked_in, check_in_time
+        select id, name, ticket_type, admission_item, sessions, photo, checked_in, check_in_time, goodie_bag, goodie_bag_time, qr_code, original
         from public.attendees
-        where qr_code_normalized = any($1::text[])
+        where ($1 != '' and (id = $1 or qr_code = $1 or qr_code_normalized = lower(trim($1))))
+           or qr_code_normalized = any($2::text[])
         limit 1
       `,
-      [candidates],
+      [candidateId, candidates],
     )
     const attendee = matchResult.rows[0]
 
@@ -425,13 +601,72 @@ api.post('/verify-scan', requireUser, async (req, res) => {
       return
     }
 
+    if (mode === 'goodie_bag') {
+      const isCheckedIn = Boolean(attendee.checked_in || attendee.check_in_time)
+      if (!isCheckedIn) {
+        res.json({
+          status: 'not_checked_in_for_goodie_bag',
+          attendee: scanAttendeePayload(attendee),
+        })
+        return
+      }
+
+      if (attendee.goodie_bag) {
+        res.json({
+          status: 'goodie_bag_duplicate',
+          attendee: scanAttendeePayload(attendee),
+        })
+        return
+      }
+
+      const updateResult = await query(
+        `
+          update public.attendees
+          set goodie_bag = true,
+              goodie_bag_time = coalesce(goodie_bag_time, now()),
+              goodie_bag_by = $2,
+              checked_in = true,
+              check_in_time = coalesce(check_in_time, now()),
+              updated_at = now()
+          where id = $1
+            and goodie_bag = false
+          returning id, name, ticket_type, admission_item, sessions, photo, checked_in, check_in_time, goodie_bag, goodie_bag_time, qr_code, original
+        `,
+        [attendee.id, req.user.id],
+      )
+      const updatedAttendee = updateResult.rows[0]
+
+      if (!updatedAttendee) {
+        const duplicateResult = await query(
+          `
+            select id, name, ticket_type, admission_item, sessions, photo, checked_in, check_in_time, goodie_bag, goodie_bag_time, qr_code, original
+            from public.attendees
+            where id = $1
+            limit 1
+          `,
+          [attendee.id],
+        )
+        const duplicateAttendee = duplicateResult.rows[0] ?? attendee
+
+        res.json({
+          status: 'goodie_bag_duplicate',
+          attendee: scanAttendeePayload(duplicateAttendee),
+        })
+        return
+      }
+
+      res.json({
+        status: 'goodie_bag_collected',
+        attendee: scanAttendeePayload(updatedAttendee),
+      })
+      return
+    }
+
+    // Default mode: checkin
     if (attendee.checked_in) {
       res.json({
         status: 'duplicate',
-        attendee: {
-          name: attendee.name,
-          checkInTime: attendee.check_in_time,
-        },
+        attendee: scanAttendeePayload(attendee),
       })
       return
     }
@@ -445,7 +680,7 @@ api.post('/verify-scan', requireUser, async (req, res) => {
             updated_at = now()
         where id = $1
           and checked_in = false
-        returning name, check_in_time
+        returning id, name, ticket_type, admission_item, sessions, photo, checked_in, check_in_time, goodie_bag, goodie_bag_time, qr_code, original
       `,
       [attendee.id, req.user.id],
     )
@@ -454,7 +689,7 @@ api.post('/verify-scan', requireUser, async (req, res) => {
     if (!checkedInAttendee) {
       const duplicateResult = await query(
         `
-          select name, check_in_time
+          select id, name, ticket_type, admission_item, sessions, photo, checked_in, check_in_time, goodie_bag, goodie_bag_time, qr_code, original
           from public.attendees
           where id = $1
           limit 1
@@ -465,20 +700,14 @@ api.post('/verify-scan', requireUser, async (req, res) => {
 
       res.json({
         status: 'duplicate',
-        attendee: {
-          name: duplicateAttendee.name,
-          checkInTime: duplicateAttendee.check_in_time,
-        },
+        attendee: scanAttendeePayload(duplicateAttendee),
       })
       return
     }
 
     res.json({
       status: 'checked_in',
-      attendee: {
-        name: checkedInAttendee.name,
-        checkInTime: checkedInAttendee.check_in_time,
-      },
+      attendee: scanAttendeePayload(checkedInAttendee),
     })
   } catch (error) {
     res.status(500).json({
@@ -487,9 +716,12 @@ api.post('/verify-scan', requireUser, async (req, res) => {
   }
 })
 
-app.use(`${basePath}/api`, api)
-if (!isProduction || process.env.ALLOW_ROOT_API === 'true') {
-  app.use('/api', api)
+
+for (const apiPath of apiMountPaths(basePath, {
+  isProduction,
+  allowRootApi: process.env.ALLOW_ROOT_API === 'true',
+})) {
+  app.use(apiPath, api)
 }
 if (basePath) {
   app.get(basePath, (_req, res) => {
@@ -607,23 +839,101 @@ async function requireAdmin(req, res, next) {
   next()
 }
 
-function setSessionCookie(res, token) {
+const allowedOrigins = (process.env.CORS_ORIGINS ?? 'https://www.newconcepttravel.com')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean)
+
+function allowFrontendOrigin(req, res, next) {
+  const origin = req.headers.origin
+
+  if (typeof origin === 'string' && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin)
+    res.setHeader('Access-Control-Allow-Credentials', 'true')
+    res.setHeader('Vary', 'Origin')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
+  }
+
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(204)
+    return
+  }
+
+  next()
+}
+
+function setSessionCookie(res, token, req) {
   res.cookie(sessionCookieName, token, {
     httpOnly: true,
     secure: useSecureCookies,
     sameSite: 'strict',
-    path: cookiePath,
+    path: requestBasePath(req),
     maxAge: sessionMaxAgeSeconds * 1000,
   })
 }
 
-function clearSessionCookie(res) {
-  res.clearCookie(sessionCookieName, {
-    httpOnly: true,
-    secure: useSecureCookies,
-    sameSite: 'strict',
-    path: cookiePath,
-  })
+function clearSessionCookie(res, req) {
+  for (const path of [requestBasePath(req), cookiePath, '/QrCode', '/corporate/QrCode']) {
+    res.clearCookie(sessionCookieName, {
+      httpOnly: true,
+      secure: useSecureCookies,
+      sameSite: 'strict',
+      path,
+    })
+  }
+}
+
+function scanAttendeePayload(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    qrCode: row.qr_code ?? '',
+    checkedIn: Boolean(row.checked_in || row.check_in_time),
+    checkInTime: row.check_in_time,
+    goodieBag: Boolean(row.goodie_bag || row.goodie_bag_time),
+    goodieBagTime: row.goodie_bag_time ?? null,
+    ticketType: row.ticket_type ?? '',
+    admissionItem:
+      (typeof row.admission_item === 'string' ? row.admission_item.trim() : '') ||
+      readOriginalField(row.original, ['admission item', 'admission', 'interval', 'interval orar', 'admissionitem']),
+    sessions:
+      (typeof row.sessions === 'string' ? row.sessions.trim() : '') ||
+      readOriginalField(row.original, ['sessions', 'session', 'programare k scan', 'programare', 'k scan', 'kscan']),
+    photo:
+      (typeof row.photo === 'string' ? row.photo.trim() : '') ||
+      readOriginalField(row.original, ['photo', 'prelucrare foto', 'foto', 'photo processing']),
+  }
+}
+
+function readOriginalField(original, aliases) {
+  if (!original || typeof original !== 'object') {
+    return ''
+  }
+
+  const wanted = new Set(aliases.map((alias) => alias.toLowerCase().replace(/[^a-z0-9]/g, '')))
+
+  for (const [key, value] of Object.entries(original)) {
+    if (wanted.has(String(key).toLowerCase().replace(/[^a-z0-9]/g, ''))) {
+      return typeof value === 'string' ? value.trim() : String(value ?? '').trim()
+    }
+  }
+
+  return ''
+}
+
+function requestBasePath(req) {
+  const url = req?.originalUrl || ''
+
+  if (url.startsWith('/corporate/QrCode')) {
+    return '/corporate/QrCode'
+  }
+
+  if (url.startsWith('/QrCode')) {
+    return '/QrCode'
+  }
+
+  return cookiePath || '/'
 }
 
 function normalizeRole(role) {

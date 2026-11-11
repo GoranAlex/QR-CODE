@@ -59,8 +59,8 @@ MAX_IMPORT_ATTENDEES=5000
 POSTGRES_SSL=true
 COOKIE_SECURE=true
 PORT=3001
-BASE_PATH=/corporate/QRCode
-VITE_BASE_PATH=/corporate/QRCode/
+BASE_PATH=/corporate/QrCode
+VITE_BASE_PATH=/corporate/QrCode/
 ```
 
 Set `POSTGRES_SSL=false` if PostgreSQL is on the same Linux server and does not use SSL.
@@ -78,17 +78,19 @@ npm run dev
 Open:
 
 ```text
-http://localhost:5173/corporate/QRCode/
+http://localhost:5173/corporate/QrCode/
 ```
+
+`http://localhost:5173/QrCode/` serves the same app during local development.
 
 Health check:
 
 ```text
-http://localhost:5173/corporate/QRCode/api/health
+http://localhost:5173/corporate/QrCode/api/health
 ```
 
-`npm run dev` starts both the Express API and the Vite frontend. Vite proxies `/corporate/QRCode/api/*` requests to Express.
-The database health endpoint `/corporate/QRCode/api/health/db` is protected and requires an admin session.
+`npm run dev` starts both the Express API and the Vite frontend. Vite reads `PORT` from `.env` and proxies `/corporate/QrCode/api/*` and `/QrCode/api/*` to Express. Express must be listening on that port.
+The database health endpoint `/corporate/QrCode/api/health/db` is protected and requires an admin session.
 
 ## Production Run
 
@@ -100,41 +102,28 @@ npm start
 Open:
 
 ```text
-http://localhost:3001/corporate/QRCode/
+http://localhost:3001/corporate/QrCode/
 ```
 
 ## Linux Deployment
 
-On the Linux server:
+The login page stays at `https://www.newconcepttravel.com/corporate/QrCode/`. That host only has the static files. The API stays at `https://qrcode.newconcepttravel.com/corporate/QrCode/`, which is the Nginx site that proxies to Express on port 3061.
+
+A production build calls `https://qrcode.newconcepttravel.com/corporate/QrCode/api/...`. Express allows the browser on `https://www.newconcepttravel.com` to send the session cookie.
+
+On the API server:
 
 ```bash
-cd /var/www/qr-code
+cd /home/nct/QRCODE
 npm install
 npm run build
-npm prune --omit=dev
-npm start
+pm2 restart qr-code-checkin
+curl -i https://qrcode.newconcepttravel.com/corporate/QrCode/api/health
 ```
 
-For production, run it with a process manager such as `pm2`:
+Copy the new `dist/` folder to the document root that serves `https://www.newconcepttravel.com/corporate/QrCode/`. Leave the existing `qrcode.newconcepttravel.com` Nginx location as it is.
 
-```bash
-npm install -g pm2
-pm2 start server/index.js --name qr-code-checkin
-pm2 save
-```
-
-Example Nginx reverse proxy:
-
-```nginx
-location /corporate/QRCode/ {
-    proxy_pass http://127.0.0.1:3001/corporate/QRCode/;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-```
+The health check must return `{"ok":true}` with `X-Powered-By: Express`. In the browser, login must request `https://qrcode.newconcepttravel.com/corporate/QrCode/api/login`, not `https://www.newconcepttravel.com/corporate/QrCode/api/login`.
 
 Use HTTPS for the live URL. Phone camera access requires HTTPS outside `localhost`.
 
@@ -143,7 +132,7 @@ Use HTTPS for the live URL. Phone camera access requires HTTPS outside `localhos
 1. Staff sign in with email/password.
 2. The backend checks `public.users.password_hash` with bcrypt.
 3. A signed HTTP-only session cookie is created.
-4. Scanner devices call `/corporate/QRCode/api/verify-scan` with only the scanned QR value.
+4. Scanner devices call `/corporate/QrCode/api/verify-scan` with only the scanned QR value.
 5. The backend rate-limits the staff user, hashes the scanned QR for audit logging, checks PostgreSQL, and atomically marks the attendee checked in.
 6. The browser receives only minimal data: status, attendee name, and check-in time.
 7. Duplicate scans are rejected server-side.
