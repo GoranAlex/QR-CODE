@@ -140,3 +140,20 @@ export type ImportAttendeesResponse = {
   message?: string
 }
 
+export type CventSyncStatus = {
+  configured: boolean
+  region?: string
+  eventId?: string | null
+  syncIntervalSec?: number
+  syncInProgress?: boolean
+  lastSyncTimestamp?: string | null
+  lastResult?: {
+    success: boolean
+    imported: number
+    updated: number
+    total: number
+    error?: string | null
+  }
+}
+
+

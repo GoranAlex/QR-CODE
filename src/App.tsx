@@ -10,15 +10,17 @@ import {
   loadAttendanceSummary,
   loadAttendees,
   loadCurrentUser,
+  loadCventStatus,
   loadEventName,
   markAttendeeCheckIn,
   markAttendeeGoodieBag,
   saveEventName,
   signIn,
   signOut,
+  triggerCventSync,
   verifyScan,
 } from './storage'
-import type { AttendanceSummary, Attendee, AuthUser, MinimalScannedAttendee, ScanMode, ScanResult } from './types'
+import type { AttendanceSummary, Attendee, AuthUser, CventSyncStatus, MinimalScannedAttendee, ScanMode, ScanResult } from './types'
 
 type AppView = 'scanner' | 'admin'
 
@@ -451,6 +453,9 @@ function App() {
   const [importSuccess, setImportSuccess] = useState('')
   const [importError, setImportError] = useState('')
   const [importWarnings, setImportWarnings] = useState<string[]>([])
+  const [cventStatus, setCventStatus] = useState<CventSyncStatus | null>(null)
+  const [cventSyncing, setCventSyncing] = useState(false)
+  const [cventSyncMsg, setCventSyncMsg] = useState('')
 
   const isAdmin = user?.role === 'admin'
 
@@ -556,10 +561,11 @@ function App() {
     setDataError('')
 
     try {
-      const [nextEventName, nextSummary, nextAttendees] = await Promise.all([
+      const [nextEventName, nextSummary, nextAttendees, nextCventStatus] = await Promise.all([
         loadEventName(),
         loadAttendanceSummary(),
         loadAttendees(),
+        loadCventStatus().catch(() => ({ configured: false })),
       ])
 
       if (dataRequestIdRef.current !== requestId || user.id !== activeUserId) {
@@ -569,6 +575,7 @@ function App() {
       setEventName(nextEventName)
       setSummary(nextSummary)
       setAttendees(nextAttendees)
+      setCventStatus(nextCventStatus)
       setScanResult((currentResult) =>
         currentResult.type === 'idle'
           ? {
@@ -1230,6 +1237,26 @@ function App() {
     }
   }
 
+  async function handleCventSync() {
+    setCventSyncing(true)
+    setCventSyncMsg('')
+    try {
+      const result = await triggerCventSync()
+      if (result.success) {
+        setCventSyncMsg(
+          `Sincronizare Cvent reușită: ${result.imported} adăugați, ${result.updated} actualizați (total ${result.total}).`,
+        )
+        await refreshData()
+      } else {
+        setCventSyncMsg(`Eroare sincronizare Cvent: ${result.error || 'Verificați configurarea.'}`)
+      }
+    } catch (err) {
+      setCventSyncMsg(err instanceof Error ? err.message : 'Eroare la sincronizarea cu Cvent.')
+    } finally {
+      setCventSyncing(false)
+    }
+  }
+
   async function handleClearData() {
     const confirmed = window.confirm('Clear all imported attendees and check-in status?')
 
@@ -1570,6 +1597,85 @@ function App() {
               <div className="alert warning">
                 Recognized columns: Name (or First/Last Name) and QR Code (or Badge Code, Barcode).
                 Optional columns: Email, Attendee ID, Company, Ticket Type.
+              </div>
+
+              <div className="cvent-sync-card">
+                <div className="cvent-sync-header">
+                  <div className="cvent-sync-title-wrap">
+                    <div className="cvent-sync-badge-row">
+                      <span className="eyebrow">Integrare Cvent</span>
+                      <span
+                        className={`cvent-status-pill ${
+                          cventStatus?.configured ? 'cvent-pill-active' : 'cvent-pill-inactive'
+                        }`}
+                      >
+                        <span className="cvent-status-dot" />
+                        {cventStatus?.syncInProgress
+                          ? 'Sincronizare...'
+                          : cventStatus?.configured
+                            ? `Live Sync Activ (${cventStatus.syncIntervalSec || 60}s)`
+                            : 'Neconfigurat'}
+                      </span>
+                    </div>
+                    <h3>Înregistrări pe loc (On-Site)</h3>
+                    <p className="cvent-sync-desc">
+                      Participanții înregistrați pe loc în Cvent sunt recunoscuți instant la scanarea biletului la intrare, iar lista este actualizată periodic în fundal.
+                    </p>
+                  </div>
+                </div>
+
+                {cventStatus?.configured ? (
+                  <div className="cvent-sync-meta">
+                    <div className="cvent-meta-item">
+                      <span className="cvent-meta-label">Ultimul sync:</span>
+                      <span className="cvent-meta-value">
+                        {cventStatus.lastSyncTimestamp ? formatDateTime(cventStatus.lastSyncTimestamp) : 'În curând...'}
+                      </span>
+                    </div>
+                    {cventStatus.lastResult && cventStatus.lastResult.total > 0 ? (
+                      <div className="cvent-meta-item">
+                        <span className="cvent-meta-label">Cvent Total:</span>
+                        <span className="cvent-meta-value">
+                          {cventStatus.lastResult.total} ({cventStatus.lastResult.imported} noi, {cventStatus.lastResult.updated} actualizați)
+                        </span>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="alert warning cvent-alert-compact">
+                    Pentru sincronizare automată Cvent, adăugați credențialele în <code>.env</code> pe server (<code>CVENT_CLIENT_ID</code>, <code>CVENT_CLIENT_SECRET</code>, <code>CVENT_EVENT_ID</code>).
+                  </div>
+                )}
+
+                {cventSyncMsg ? (
+                  <div className={`alert ${cventSyncMsg.includes('Eroare') ? 'error' : 'success'}`}>
+                    {cventSyncMsg}
+                  </div>
+                ) : null}
+
+                <div className="cvent-sync-actions">
+                  <button
+                    type="button"
+                    className="secondary-button cvent-sync-btn"
+                    disabled={cventSyncing || dataLoading || !cventStatus?.configured}
+                    onClick={handleCventSync}
+                  >
+                    <svg
+                      width="15"
+                      height="15"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className={cventSyncing ? 'spin-icon' : ''}
+                    >
+                      <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+                    </svg>
+                    <span>{cventSyncing ? 'Se sincronizează...' : 'Sincronizează Cvent Acum'}</span>
+                  </button>
+                </div>
               </div>
 
               <button type="button" className="secondary-button" disabled={dataLoading} onClick={refreshData}>

@@ -7,6 +7,12 @@ import dotenv from 'dotenv'
 import express from 'express'
 import { SignJWT, jwtVerify } from 'jose'
 import pg from 'pg'
+import {
+  getCventStatus,
+  syncAttendeesFromCvent,
+  findAndImportCventAttendee,
+  startCventBackgroundSync,
+} from './cvent.js'
 
 dotenv.config()
 
@@ -56,7 +62,9 @@ async function ensureSchema() {
       ALTER TABLE public.attendees ADD COLUMN IF NOT EXISTS goodie_bag boolean NOT NULL DEFAULT false;
       ALTER TABLE public.attendees ADD COLUMN IF NOT EXISTS goodie_bag_time timestamptz;
       ALTER TABLE public.attendees ADD COLUMN IF NOT EXISTS goodie_bag_by uuid REFERENCES public.users(id);
+      ALTER TABLE public.attendees ADD COLUMN IF NOT EXISTS cvent_id text;
       CREATE INDEX IF NOT EXISTS attendees_goodie_bag_idx ON public.attendees (goodie_bag);
+      CREATE INDEX IF NOT EXISTS attendees_cvent_id_idx ON public.attendees (cvent_id);
     `)
 
     const defaultPasswordHash = await bcrypt.hash('admin123', 10)
@@ -76,7 +84,9 @@ async function ensureSchema() {
     console.warn('Database schema check warning:', err.message)
   }
 }
-ensureSchema()
+ensureSchema().then(() => {
+  startCventBackgroundSync(pool)
+})
 
 const api = express.Router()
 
@@ -207,6 +217,32 @@ api.put('/settings', requireAdmin, async (req, res) => {
     res.status(500).json({
       error: error instanceof Error ? error.message : 'Unable to save settings.',
     })
+  }
+})
+
+api.get('/cvent/status', requireUser, (_req, res) => {
+  res.json(getCventStatus())
+})
+
+api.post('/cvent/sync', requireAdmin, async (_req, res) => {
+  try {
+    const result = await syncAttendeesFromCvent(pool, { fullSync: true })
+    res.json(result)
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Cvent sync failed.',
+    })
+  }
+})
+
+api.post('/webhooks/cvent', async (req, res) => {
+  try {
+    res.status(200).json({ received: true })
+    syncAttendeesFromCvent(pool, { fullSync: false }).catch((err) => {
+      console.warn('[Cvent Webhook] Sync error:', err.message)
+    })
+  } catch (err) {
+    console.warn('[Cvent Webhook] Error:', err.message)
   }
 })
 
@@ -594,11 +630,21 @@ api.post('/verify-scan', requireUser, async (req, res) => {
       `,
       [candidateId, candidates],
     )
-    const attendee = matchResult.rows[0]
+    let attendee = matchResult.rows[0]
 
     if (!attendee) {
-      res.json({ status: 'not_found' })
-      return
+      // Real-time lookup in Cvent API for on-site registrations
+      const cventAttendee = await findAndImportCventAttendee(scannedCode || candidateId, {
+        pool,
+        userId: req.user.id,
+      })
+
+      if (cventAttendee) {
+        attendee = cventAttendee
+      } else {
+        res.json({ status: 'not_found' })
+        return
+      }
     }
 
     if (mode === 'goodie_bag') {

@@ -1,4 +1,4 @@
-import type { AttendanceSummary, Attendee, AuthUser, ImportAttendeesResponse, ScanMode, VerifyScanResponse } from './types'
+import type { AttendanceSummary, Attendee, AuthUser, CventSyncStatus, ImportAttendeesResponse, ScanMode, VerifyScanResponse } from './types'
 
 type AttendeeApiRow = {
   id: string
@@ -196,6 +196,18 @@ export async function markAttendeeCheckIn(id: string, code?: string): Promise<Ve
   } catch {
     return verifyScan(code || id, 'checkin', id)
   }
+}
+
+export async function loadCventStatus(): Promise<CventSyncStatus> {
+  try {
+    return await apiFetch<CventSyncStatus>('/api/cvent/status', { method: 'GET' })
+  } catch {
+    return { configured: false }
+  }
+}
+
+export async function triggerCventSync(): Promise<{ success: boolean; imported: number; updated: number; total: number; error?: string }> {
+  return await apiFetch('/api/cvent/sync', { method: 'POST' })
 }
 
 type ApiFetchOptions = {
