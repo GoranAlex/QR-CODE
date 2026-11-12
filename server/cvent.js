@@ -25,10 +25,12 @@ function getCventConfig() {
   const region = (process.env.CVENT_REGION || 'eu').trim().toLowerCase() // 'eu' or 'na'
   const syncIntervalSec = Math.max(Number(process.env.CVENT_SYNC_INTERVAL_SEC || 60), 15)
 
-  // Cvent API Base URLs
-  const baseUrl = region === 'na'
-    ? 'https://api-platform.cvent.com/ea'
-    : 'https://api-platform-eu.cvent.com/ea'
+  // Cvent API Base URLs (Europe: api-platform-eur.cvent.com, North America: api-platform.cvent.com)
+  const baseUrl = (process.env.CVENT_BASE_URL || '').trim() || (
+    region === 'na' || region === 'us'
+      ? 'https://api-platform.cvent.com/ea'
+      : 'https://api-platform-eur.cvent.com/ea'
+  )
 
   const tokenUrl = `${baseUrl}/oauth2/token`
 
