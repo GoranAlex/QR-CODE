@@ -2797,10 +2797,10 @@ body.modal-open {
 
 /* ─── Modal Camera Section (Strictly bounded height - NEVER overflows) ─── */
 .scanner-modal-camera-section {
-  flex: 0 0 35vh;
-  height: 35vh;
-  max-height: 260px;
-  min-height: 170px;
+  flex: 0 0 38vh;
+  height: 38vh;
+  max-height: 290px;
+  min-height: 180px;
   padding: 4px 14px 6px 14px;
   box-sizing: border-box;
   width: 100%;
@@ -2917,6 +2917,42 @@ body.modal-open {
   background: #22c55e;
   box-shadow: 0 0 8px #22c55e;
   animation: pulseLiveDot 1.6s infinite ease-in-out;
+}
+
+.scanner-torch-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 10;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  padding: 5px 12px !important;
+  min-height: 28px !important;
+  height: 28px !important;
+  background: rgba(15, 23, 42, 0.75) !important;
+  backdrop-filter: blur(8px) !important;
+  -webkit-backdrop-filter: blur(8px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.2) !important;
+  border-radius: var(--radius-pill) !important;
+  color: #ffffff !important;
+  font-size: 0.72rem !important;
+  font-weight: 700 !important;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25) !important;
+}
+
+.scanner-torch-btn:hover {
+  background: rgba(15, 23, 42, 0.9) !important;
+  border-color: rgba(255, 255, 255, 0.35) !important;
+}
+
+.scanner-torch-btn.active {
+  background: #f59e0b !important;
+  color: #0f172a !important;
+  border-color: #fbbf24 !important;
+  box-shadow: 0 0 14px rgba(245, 158, 11, 0.5) !important;
 }
 
 @keyframes pulseLiveDot {

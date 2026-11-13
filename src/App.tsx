@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { BrowserQRCodeReader } from '@zxing/browser'
-import type { IScannerControls } from '@zxing/browser'
+import type { FastScannerControls } from './scanner'
+import { playScanChirp, startFastQrScanner, triggerScanHaptic } from './scanner'
 import './App.css'
 import { exportAttendeesAsCsv, exportAttendeesAsXlsx, normalizeCode, parseAttendeeWorkbook } from './excel'
 import {
@@ -440,7 +440,9 @@ function App() {
     goodieBagRemaining: 0,
   })
   const videoRef = useRef<HTMLVideoElement | null>(null)
-  const controlsRef = useRef<IScannerControls | null>(null)
+  const controlsRef = useRef<FastScannerControls | null>(null)
+  const [hasTorch, setHasTorch] = useState(false)
+  const [torchActive, setTorchActive] = useState(false)
   const lastScanRef = useRef({ code: '', scannedAt: 0 })
   const scanHoldUntilRef = useRef(0)
   const scanPendingRef = useRef(false)
@@ -544,6 +546,8 @@ function App() {
   const stopCamera = useCallback(() => {
     controlsRef.current?.stop()
     controlsRef.current = null
+    setHasTorch(false)
+    setTorchActive(false)
     setCameraOn(false)
   }, [])
 
@@ -955,6 +959,8 @@ function App() {
       suppressCodeRef.current = ''
 
       scanPendingRef.current = true
+      playScanChirp()
+      triggerScanHaptic()
 
       try {
         const response = await verifyScan(scannedCode, mode)
@@ -1151,25 +1157,21 @@ function App() {
     }
 
     let cancelled = false
-    const codeReader = new BrowserQRCodeReader()
 
     async function startCamera() {
       try {
         setCameraError('')
-        const controls = await codeReader.decodeFromConstraints(
-          {
-            audio: false,
-            video: {
-              facingMode: { ideal: 'environment' },
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-            },
-          },
-          videoRef.current ?? undefined,
-          (result) => {
-            if (result) {
-              handleQrScan(result.getText())
+        if (!videoRef.current) return
+
+        const controls = await startFastQrScanner(
+          videoRef.current,
+          (code) => {
+            if (!cancelled) {
+              handleQrScan(code)
             }
+          },
+          (error) => {
+            setCameraError(cameraHelpMessage(error))
           },
         )
 
@@ -1179,6 +1181,8 @@ function App() {
         }
 
         controlsRef.current = controls
+        setHasTorch(controls.hasTorch)
+        setTorchActive(controls.isTorchOn())
       } catch (error) {
         setCameraError(cameraHelpMessage(error))
         setCameraOn(false)
@@ -1191,6 +1195,8 @@ function App() {
       cancelled = true
       controlsRef.current?.stop()
       controlsRef.current = null
+      setHasTorch(false)
+      setTorchActive(false)
     }
   }, [cameraOn, handleQrScan, scannerModalOpen])
 
@@ -1198,6 +1204,13 @@ function App() {
     event.preventDefault()
     handleQrScan(manualCode, 'manual')
     setManualCode('')
+  }
+
+  async function handleToggleTorch() {
+    if (controlsRef.current?.hasTorch) {
+      const newState = await controlsRef.current.toggleTorch()
+      setTorchActive(newState)
+    }
   }
 
   async function handleFileSelect(event: React.ChangeEvent<HTMLInputElement>) {
@@ -1954,6 +1967,29 @@ function App() {
                       <span className="live-dot" />
                       <span>Scanner Activ</span>
                     </div>
+                    {hasTorch ? (
+                      <button
+                        type="button"
+                        className={`scanner-torch-btn ${torchActive ? 'active' : ''}`}
+                        onClick={handleToggleTorch}
+                        title={torchActive ? 'Oprește lanterna' : 'Pornește lanterna'}
+                        aria-label="Lanternă"
+                      >
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill={torchActive ? 'currentColor' : 'none'}
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                        </svg>
+                        <span>{torchActive ? 'Lumină ON' : 'Lanternă'}</span>
+                      </button>
+                    ) : null}
                   </>
                 )}
               </div>
