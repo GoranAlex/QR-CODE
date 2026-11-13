@@ -94,28 +94,78 @@ export async function getCventAccessToken() {
   return cachedToken
 }
 
+const resolvedEventUuidCache = new Map()
+const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * Resolves either a Cvent Event UUID or a short Event Code (e.g. Y2N4F8M8SY3) into an Event UUID
+ */
+export async function resolveEventUuid(config, token) {
+  const rawEventId = config.eventId
+  if (!rawEventId) {
+    throw new Error('CVENT_EVENT_ID is empty.')
+  }
+
+  if (uuidRegex.test(rawEventId)) {
+    return rawEventId
+  }
+
+  if (resolvedEventUuidCache.has(rawEventId)) {
+    return resolvedEventUuidCache.get(rawEventId)
+  }
+
+  const filter = encodeURIComponent(`code eq '${rawEventId}'`)
+  const response = await fetch(`${config.baseUrl}/events?filter=${filter}&limit=5`, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Accept': 'application/json',
+    },
+  })
+
+  if (!response.ok) {
+    const errText = await response.text()
+    throw new Error(`Failed to resolve Cvent event code '${rawEventId}' (${response.status}): ${errText}`)
+  }
+
+  const body = await response.json()
+  const matchedEvent = Array.isArray(body.data) ? body.data[0] : null
+  if (!matchedEvent?.id) {
+    throw new Error(`No Cvent event found matching code '${rawEventId}'.`)
+  }
+
+  resolvedEventUuidCache.set(rawEventId, matchedEvent.id)
+  console.log(`[Cvent] Resolved event code '${rawEventId}' -> UUID '${matchedEvent.id}' (${matchedEvent.title || 'Untitled'})`)
+  return matchedEvent.id
+}
+
 /**
  * Normalizes a Cvent attendee payload to our database schema
  */
 export function normalizeCventAttendee(raw) {
   if (!raw || typeof raw !== 'object') return null
 
+  const contact = raw.contact && typeof raw.contact === 'object' ? raw.contact : {}
+
   // Cvent Attendee / Registration properties
   const cventId = String(raw.id || raw.attendeeId || raw.attendee_id || '').trim()
   const confirmationNumber = String(raw.confirmationNumber || raw.confirmation_number || raw.referenceId || '').trim()
   const barcode = String(raw.barcode || raw.badgeBarcode || '').trim()
 
-  const firstName = String(raw.firstName || raw.first_name || '').trim()
-  const lastName = String(raw.lastName || raw.last_name || '').trim()
+  const firstName = String(contact.firstName || raw.firstName || raw.first_name || '').trim()
+  const lastName = String(contact.lastName || raw.lastName || raw.last_name || '').trim()
   const fullName = `${firstName} ${lastName}`.trim() || String(raw.name || 'Participant Cvent').trim()
 
-  const email = String(raw.email || raw.emailAddress || '').trim().toLowerCase()
-  const company = String(raw.company || raw.companyName || raw.organization || '').trim()
+  const email = String(contact.email || raw.email || raw.emailAddress || '').trim().toLowerCase()
+  const company = String(contact.company || raw.company || raw.companyName || raw.organization || '').trim()
+
+  const rawAdmissionName =
+    (raw.admissionItem && typeof raw.admissionItem === 'object' ? raw.admissionItem.name : raw.admissionItem) || ''
+  const rawRegTypeName =
+    (raw.registrationType && typeof raw.registrationType === 'object' ? raw.registrationType.name : raw.registrationType) || ''
 
   const ticketType = String(
-    raw.registrationType ||
+    rawRegTypeName ||
     raw.registration_type ||
-    raw.admissionItem ||
     raw.status ||
     'General'
   ).trim()
@@ -127,7 +177,7 @@ export function normalizeCventAttendee(raw) {
   const qrCodeNormalized = qrCode.toLowerCase().trim()
 
   // Extract answers / custom fields
-  let admissionItem = ''
+  let admissionItem = String(rawAdmissionName || '').trim()
   let sessions = ''
   let photo = ''
 
@@ -140,11 +190,16 @@ export function normalizeCventAttendee(raw) {
         : []
 
   for (const item of customFields) {
-    const questionText = String(item.question || item.name || item.title || '').toLowerCase()
-    const answerText = String(item.answer || item.value || '').trim()
+    const questionText = String(item.question?.text || item.question?.name || item.question || item.name || item.title || '').toLowerCase()
+    const rawVal = item.answer ?? item.value
+    const answerText = Array.isArray(rawVal)
+      ? rawVal.map((v) => String(v ?? '').trim()).filter(Boolean).join(', ')
+      : String(rawVal ?? '').trim()
+
+    if (!answerText) continue
 
     if (questionText.includes('interval') || questionText.includes('admission')) {
-      admissionItem = answerText
+      if (!admissionItem) admissionItem = answerText
     } else if (questionText.includes('session') || questionText.includes('programare')) {
       sessions = answerText
     } else if (questionText.includes('foto') || questionText.includes('photo')) {
@@ -184,12 +239,20 @@ export async function findCventAttendee(codeOrEmail) {
 
   try {
     const token = await getCventAccessToken()
+    const eventUuid = await resolveEventUuid(config, token)
+    const safeCode = cleanCode.replace(/'/g, "\\'")
 
-    // 1. Direct query by confirmationNumber or email or id
+    let codeFilter = `confirmationNumber eq '${safeCode}'`
+    if (uuidRegex.test(cleanCode)) {
+      codeFilter = `id eq '${safeCode}'`
+    } else if (cleanCode.includes('@')) {
+      codeFilter = `contact.email eq '${safeCode}'`
+    }
+
     const filterQuery = encodeURIComponent(
-      `confirmationNumber eq '${cleanCode}' or email eq '${cleanCode}' or id eq '${cleanCode}'`
+      `event.id eq '${eventUuid}' and ${codeFilter}`
     )
-    const url = `${config.baseUrl}/events/${config.eventId}/attendees?filter=${filterQuery}&limit=5`
+    const url = `${config.baseUrl}/attendees?filter=${filterQuery}&limit=5`
 
     const response = await fetch(url, {
       method: 'GET',
@@ -200,15 +263,7 @@ export async function findCventAttendee(codeOrEmail) {
     })
 
     if (!response.ok) {
-      // Try fallback to general attendees endpoint
-      const fallbackUrl = `${config.baseUrl}/attendees?filter=eventId eq '${config.eventId}' and (${filterQuery})&limit=5`
-      const fbResponse = await fetch(fallbackUrl, {
-        headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' },
-      })
-      if (!fbResponse.ok) return null
-      const fbData = await fbResponse.json()
-      const list = Array.isArray(fbData.data) ? fbData.data : Array.isArray(fbData) ? fbData : []
-      return list[0] ? normalizeCventAttendee(list[0]) : null
+      return null
     }
 
     const data = await response.json()
@@ -329,14 +384,16 @@ export async function syncAttendeesFromCvent(pool, options = {}) {
 
   try {
     const token = await getCventAccessToken()
-    let nextUrl = `${config.baseUrl}/events/${config.eventId}/attendees?limit=200`
+    const eventUuid = await resolveEventUuid(config, token)
     const isFullSync = options.fullSync || !lastSyncTimestamp
 
-    // If incremental sync, filter by lastModified
+    let filterExpr = `event.id eq '${eventUuid}'`
     if (!isFullSync && lastSyncTimestamp) {
       const sinceIso = new Date(lastSyncTimestamp - 120000).toISOString() // 2-min buffer
-      nextUrl += `&filter=${encodeURIComponent(`lastModified ge '${sinceIso}'`)}`
+      filterExpr += ` and lastModified ge '${sinceIso}'`
     }
+
+    let nextUrl = `${config.baseUrl}/attendees?limit=200&filter=${encodeURIComponent(filterExpr)}`
 
     const fetchedAttendees = []
 
@@ -358,8 +415,8 @@ export async function syncAttendeesFromCvent(pool, options = {}) {
       const items = Array.isArray(body.data) ? body.data : Array.isArray(body) ? body : []
       fetchedAttendees.push(...items)
 
-      // Pagination
-      nextUrl = body.paging?.next || null
+      // Pagination (Cvent REST API v1 uses paging._links.next.href)
+      nextUrl = body.paging?._links?.next?.href || body.paging?.next || null
     }
 
     // Process and upsert attendees into Postgres
